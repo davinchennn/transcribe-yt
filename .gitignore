@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment variables
+.env
+.env.local
+
+# Project-specific
+/downloads
+/transcripts
+data
+
+# Legacy storage locations (pre-004)
+.transcripts-state.json
+.transcripts-state.json.lock
+.transcripts-state.backup-*.json
+.transcripts.db
+.transcripts.db-wal
+.transcripts.db-shm
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Node (root and all subdirectories)
+node_modules/
+
+# OS
+.DS_Store

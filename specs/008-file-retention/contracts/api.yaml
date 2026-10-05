@@ -1,0 +1,102 @@
+# OpenAPI Contract Changes for File Retention Options
+# Feature: 008-file-retention
+
+openapi: 3.0.3
+info:
+  title: Transcripts API - File Retention Extension
+  version: 0.2.0
+  description: |
+    Extended API contract for file retention options.
+    Only showing changed/new components.
+
+paths:
+  /api/jobs:
+    post:
+      summary: Create a new transcription job
+      description: |
+        Create a new job with optional file retention preferences.
+        By default, both video and audio files are retained.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobCreate'
+            examples:
+              default:
+                summary: Default (keep both files)
+                value:
+                  url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+              audio_only:
+                summary: Keep audio only
+                value:
+                  url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                  keep_video: false
+              transcript_only:
+                summary: Keep transcript only (delete all media)
+                value:
+                  url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                  keep_video: false
+                  keep_audio: false
+      responses:
+        '200':
+          description: Job created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+        '400':
+          description: Invalid YouTube URL
+
+components:
+  schemas:
+    JobCreate:
+      type: object
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          description: YouTube video URL
+          example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        keep_video:
+          type: boolean
+          default: true
+          description: |
+            Whether to retain the video file after transcription completes.
+            If false, the video file is deleted after successful transcription.
+        keep_audio:
+          type: boolean
+          default: true
+          description: |
+            Whether to retain the audio file after transcription completes.
+            If false, the audio file is deleted after successful transcription.
+
+    JobResponse:
+      type: object
+      description: |
+        Job response remains unchanged. Does not expose retention preferences
+        as they are internal implementation details.
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+        stage:
+          type: string
+          enum: [pending, downloading, extracting, transcribing, saving, completed, failed]
+        title:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        provider:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time

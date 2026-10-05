@@ -1,0 +1,17 @@
+[project]
+name = "transcripts-workspace"
+version = "0.0.0"
+description = "YouTube transcription monorepo"
+requires-python = ">=3.8.1"
+dependencies = ["transcripts", "transcripts-api"]
+
+[tool.uv.workspace]
+members = ["packages/core", "packages/api"]
+
+[tool.uv.sources]
+transcripts = { workspace = true }
+transcripts-api = { workspace = true }
+
+[tool.black]
+line-length = 88
+target-version = ['py38']

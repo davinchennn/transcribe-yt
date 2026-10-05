@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project]
+name = "transcripts"
+version = "0.1.0"
+description = "YouTube transcription library and CLI"
+requires-python = ">=3.8.1"
+dependencies = [
+    "yt-dlp>=2023.12.0",
+    "assemblyai>=0.28.0",
+    "deepgram-sdk>=3.2.0",
+    "python-dotenv>=1.0.0",
+    "filelock>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+transcribe = "transcripts.cli.main:main"
