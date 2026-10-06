@@ -71,12 +71,12 @@
 
 **Goal**: Users can see status of all jobs with a single command
 
-**Independent Test**: Run `transcribe --status` and see list of jobs with their current state
+**Independent Test**: Run `transcribe list` and see list of jobs with their current state
 
 ### Implementation for User Story 2
 
 - [ ] T025 [US2] Add StateManager.list_jobs(filter_stage=None) method in src/transcripts/state.py
-- [ ] T026 [US2] Add --status flag to argument parser in src/transcripts/cli/main.py
+- [ ] T026 [US2] Add list subcommand to argument parser in src/transcripts/cli/main.py
 - [ ] T027 [US2] Implement status display: format job list as table (title, stage, error, updated_at) in src/transcripts/cli/main.py
 - [ ] T028 [US2] Handle empty state file gracefully (show "No jobs found") in src/transcripts/cli/main.py
 

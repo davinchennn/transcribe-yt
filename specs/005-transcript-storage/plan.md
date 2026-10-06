@@ -168,7 +168,7 @@ No significant complexity - straightforward extension of existing storage patter
 ## Testing Checklist
 
 - [ ] New transcription saves to database
-- [ ] `--status` still works (job data unaffected)
+- [ ] `transcribe list` still works (job data unaffected)
 - [ ] Can retrieve transcript by job_id
 - [ ] Search finds matching transcripts
 - [ ] FTS ranking returns relevant results first

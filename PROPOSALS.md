@@ -12,7 +12,7 @@ Ideas for future development. Use spec-kit (`/speckit.specify`) to develop any o
 
 - [ ] `--version` flag
 - [ ] Progress bar during download/transcription
-- [ ] `--json` output mode for scripting
+- [x] `transcribe list --json` inventory output for scripting
 - [ ] `--quiet` / `--verbose` flags
 
 ## New Features
@@ -31,7 +31,7 @@ Ideas for future development. Use spec-kit (`/speckit.specify`) to develop any o
 
 ## Documentation
 
-- [ ] Update README with new CLI flags (`--status`, `--retry-failed`, etc.)
+- [ ] Update README with CLI commands/options (`transcribe list`, `--retry-failed`, etc.)
 - [ ] Add usage examples
 - [ ] API documentation for Python library
 

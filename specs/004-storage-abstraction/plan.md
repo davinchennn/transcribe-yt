@@ -179,7 +179,7 @@ No complexity concerns - straightforward refactor with clear interface.
 ## Testing Checklist
 
 - [ ] `transcribe <url>` works with SQLite (default)
-- [ ] `transcribe --status` shows jobs from SQLite
+- [ ] `transcribe list` shows jobs from SQLite
 - [ ] `transcribe --retry-failed` works with SQLite
 - [ ] `transcribe --clear-completed` works with SQLite
 - [ ] `transcribe --clear-all` works with SQLite

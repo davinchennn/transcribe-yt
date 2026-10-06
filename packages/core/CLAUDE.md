@@ -17,7 +17,9 @@ uv run transcribe --export <job_id> --format json
 uv run transcribe --export <job_id> --format txt
 
 # Job management
-uv run transcribe --status
+uv run transcribe list
+uv run transcribe list --query Lauren --source x --json
+uv run transcribe list --id <job_id> --json
 uv run transcribe --retry-failed
 uv run transcribe --clear-completed
 uv run transcribe --migrate  # JSON to SQLite migration
@@ -44,6 +46,11 @@ STORAGE_PATH=             # Optional custom path
 ```
 
 Default paths and directory layout: see [root README](../../README.md#data-directories).
+
+`transcribe list` opens existing storage read-only and reports the resolved path.
+It exposes source identity, transcript/timing availability, existing media, and
+independent summary/Timeline/Topics states. It does not initialize schema or
+create a missing database. Use an exact job ID or source filter when titles match.
 
 ## Code Patterns
 

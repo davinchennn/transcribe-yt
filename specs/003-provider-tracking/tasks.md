@@ -22,8 +22,8 @@
 
 ## Phase 3: CLI Display
 
-- [ ] T005 [US1] Update `_show_status()` to add Provider column to table header in src/transcripts/cli/main.py
-- [ ] T006 [US1] Update `_show_status()` to display provider (or "-" if None) for each job in src/transcripts/cli/main.py
+- [ ] T005 [US1] Update `_list_main()` to add Provider column to table header in src/transcripts/cli/main.py
+- [ ] T006 [US1] Update `_list_main()` to display provider (or "-" if None) for each job in src/transcripts/cli/main.py
 
 ---
 

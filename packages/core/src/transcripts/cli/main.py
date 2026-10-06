@@ -1,6 +1,8 @@
 """CLI entry point for transcripts package."""
 
 import argparse
+import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import List
@@ -37,8 +39,12 @@ def read_urls_from_file(filepath: str) -> List[str]:
 
 def main() -> None:
     """Main CLI entry point."""
+    if sys.argv[1:2] == ["list"]:
+        _list_main(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser(
-        description="Download YouTube or X/Twitter videos, extract audio, and generate transcripts using Deepgram (or AssemblyAI)"
+        description="Download YouTube or X/Twitter videos, extract audio, and generate transcripts using Deepgram (or AssemblyAI)",
+        epilog="List saved video data with: transcribe list --help",
     )
 
     parser.add_argument(
@@ -149,12 +155,6 @@ def main() -> None:
 
     # Job management arguments
     parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Show status of all transcription jobs",
-    )
-
-    parser.add_argument(
         "--retry-failed",
         action="store_true",
         help="Retry all failed transcription jobs",
@@ -207,10 +207,6 @@ def main() -> None:
     state_manager = StateManager()
 
     # Handle job management commands first
-    if args.status:
-        _show_status(state_manager)
-        return
-
     if args.clear_completed:
         count = state_manager.clear_jobs(filter_stage=Stage.COMPLETED)
         print(f"Cleared {count} completed job(s)")
@@ -243,7 +239,7 @@ def main() -> None:
 
     # Validate arguments for normal processing
     if not args.url and not args.playlist and not args.file:
-        parser.error("Must provide either a URL, --playlist, --file, or a job management flag (--status, --retry-failed, --clear-completed, --clear-all)")
+        parser.error("Provide a URL, --playlist, --file, a job management flag, or use 'transcribe list' to inspect saved data")
 
     if sum([bool(args.url), bool(args.playlist), bool(args.file)]) > 1:
         parser.error("Can only specify one of: URL, --playlist, or --file")
@@ -309,44 +305,42 @@ def main() -> None:
         sys.exit(1)
 
 
-def _show_status(state_manager: StateManager) -> None:
-    """Display status of all jobs."""
-    jobs = state_manager.list_jobs()
+def _list_main(arguments: List[str]) -> None:
+    """Inspect saved data before constructing any write-capable storage backend."""
+    from transcripts.inventory import list_inventory
 
-    if not jobs:
-        print("No jobs found")
+    parser = argparse.ArgumentParser(prog="transcribe list", description="List saved videos and available data without changing records.")
+    parser.add_argument("--query", help="Match title, URL or job ID (case-insensitive)")
+    parser.add_argument("--source", choices=["youtube", "x"], help="Filter by video platform")
+    parser.add_argument("--id", dest="job_id", help="Select an exact job ID")
+    parser.add_argument("--stage", choices=[stage.value for stage in Stage], help="Filter by processing stage")
+    parser.add_argument("--json", dest="as_json", action="store_true", help="Print the complete inventory metadata as JSON")
+    args = parser.parse_args(arguments)
+    try:
+        inventory = list_inventory(query=args.query, source=args.source, job_id=args.job_id, stage=args.stage)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
+        parser.exit(1, f"Could not list saved data: {error}\n")
+    if args.as_json:
+        print(json.dumps(inventory, indent=2, ensure_ascii=False))
         return
-
-    print(f"\n{'Title':<40} {'Stage':<12} {'Provider':<12} {'Updated':<20} {'Error'}")
-    print("-" * 105)
-
-    for job in jobs:
-        title = (job.title or job.id)[:38]
-        stage = job.stage.value
-        provider = job.provider or "-"
-        updated = job.updated_at[:19].replace("T", " ")
-        error = (job.error or "")[:20]
-
-        # Add color indicators for stage
-        if job.stage == Stage.COMPLETED:
-            stage_display = f"\033[32m{stage}\033[0m"  # Green
-        elif job.stage == Stage.FAILED:
-            stage_display = f"\033[31m{stage}\033[0m"  # Red
-        elif job.stage in (Stage.DOWNLOADING, Stage.TRANSCRIBING):
-            stage_display = f"\033[33m{stage}\033[0m"  # Yellow
-        else:
-            stage_display = stage
-
-        print(f"{title:<40} {stage_display:<21} {provider:<12} {updated:<20} {error}")
-
-    print()
-
-    # Summary
-    completed = sum(1 for j in jobs if j.stage == Stage.COMPLETED)
-    failed = sum(1 for j in jobs if j.stage == Stage.FAILED)
-    in_progress = sum(1 for j in jobs if j.stage not in (Stage.COMPLETED, Stage.FAILED, Stage.PENDING))
-
-    print(f"Total: {len(jobs)} | Completed: {completed} | Failed: {failed} | In Progress: {in_progress}")
+    print(f"Storage: {inventory['storage']['backend']} · {inventory['storage']['path']}")
+    if not inventory["jobs"]:
+        print("No matching jobs found")
+        return
+    headers = ["ID", "Source", "Stage", "Transcript", "Summary", "Timeline", "Topics", "Provider", "Title"]
+    rows = []
+    for job in inventory["jobs"]:
+        statuses = [job["analysis"]["status"], job["navigation"]["timeline"]["status"], job["navigation"]["topics"]["status"]]
+        rows.append([
+            job["id"], job["source"] or "Unknown", job["stage"],
+            "Yes" if job["transcript"]["available"] else "No",
+            *(value.replace("_", " ").capitalize() for value in statuses),
+            job["transcription_provider"] or "-", " ".join((job["title"] or job["id"]).split()),
+        ])
+    widths = [max(len(row[index]) for row in [headers] + rows) for index in range(len(headers))]
+    for row in [headers] + rows:
+        print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+    print(f"Total: {inventory['total']}")
 
 
 def _retry_failed(state_manager: StateManager, args) -> None:

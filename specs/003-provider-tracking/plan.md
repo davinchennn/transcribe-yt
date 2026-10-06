@@ -4,7 +4,7 @@
 
 ## Summary
 
-Add a `provider` field to the Job model to track which transcription service (Deepgram or AssemblyAI) was used. Display this in the `--status` output.
+Add a `provider` field to the Job model to track which transcription service (Deepgram or AssemblyAI) was used. Display this in the `transcribe list` output.
 
 ## Technical Context
 
@@ -29,7 +29,7 @@ src/transcripts/
 1. Add `provider: Optional[str]` field to Job dataclass
 2. Update `Job.to_dict()` and `Job.from_dict()` to include provider
 3. Update `TranscriptProcessor.process_video()` to set job.provider
-4. Update `_show_status()` to display provider column
+4. Update `_list_main()` to display provider column
 5. Handle legacy jobs (provider=None → display "-")
 
 ## Complexity Tracking

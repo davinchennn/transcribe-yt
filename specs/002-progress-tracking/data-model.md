@@ -103,5 +103,5 @@ Represents a single transcription task.
 ## Indexes / Lookups
 
 - **By ID**: Primary lookup for resume/duplicate detection
-- **By stage**: Filter for `--status` display and `--retry-failed`
+- **By stage**: Filter for `transcribe list` display and `--retry-failed`
 - **By updated_at**: Sort for status display (most recent first)

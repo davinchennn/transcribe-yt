@@ -10,7 +10,7 @@
 
 ### User Story 1 - View Job Dashboard (Priority: P1)
 
-User opens the web application and sees a dashboard showing all transcription jobs with their current status, similar to the CLI `--status` output but in a rich visual format.
+User opens the web application and sees a dashboard showing all transcription jobs with their current status, similar to the CLI `transcribe list` output but in a rich visual format.
 
 **Why this priority**: This is the entry point to the application. Without visibility into jobs, users can't effectively use any other feature.
 

@@ -42,7 +42,7 @@ src/transcripts/
 ├── __init__.py
 ├── cli/
 │   ├── __init__.py
-│   └── main.py          # MODIFY: Add --status, --retry-failed, --clear-* flags
+│   └── main.py          # MODIFY: Add list command, --retry-failed, --clear-* flags
 ├── config.py
 ├── converter.py
 ├── downloader.py
@@ -70,7 +70,7 @@ tests/
 3. Implement file existence verification for resume
 
 ### Phase 3: CLI Commands
-1. Add `--status` flag to show all jobs
+1. Add `transcribe list` subcommand to show all jobs
 2. Add `--retry-failed` flag to retry failed jobs
 3. Add `--clear-completed` and `--clear-all` flags
 4. Auto-detect and resume when same URL is re-submitted

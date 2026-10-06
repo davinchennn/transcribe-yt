@@ -71,18 +71,18 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
   const [searchMode, setSearchMode] = useState<SearchMode>('exact');
   const [copyMessage, setCopyMessage] = useState('');
   const video = useRef<VideoHandle>(null);
-  const timeline = useNavigation(job.id, 'timeline', data.navigation?.timeline);
-  const topics = useNavigation(job.id, 'topics', data.navigation?.topics);
+  const activeQuery = useNavigation(job.id, view);
   const creation = useCreateNavigation(job.id);
   const summaryUpdate = useUpdateNavigationSummaries(job.id);
   const summaryMutation = useAnalyzeJob();
   const search = useMutation({ mutationFn: ({ query, mode }: { query: string; mode: SearchMode }) => searchTranscript(job.id, query, mode) });
-  const activeQuery = view === 'timeline' ? timeline : topics;
-  const analysis = activeQuery.data;
+  const analysis = activeQuery.isError || (activeQuery.isFetching && !isProcessing(activeQuery.data?.status))
+    ? undefined : activeQuery.data;
   const creating = (creation.isPending && creation.variables === view) || isProcessing(analysis?.status);
+  const checking = activeQuery.isFetching && !creating;
   const duration = transcriptDuration(transcript);
   const viewLabel = view === 'timeline' ? 'Timeline' : 'Topics';
-  const timelineAnalysisKey = `${job.id}:${timeline.data?.updated_at ?? ''}`;
+  const timelineAnalysisKey = `${job.id}:${(view === 'timeline' ? analysis : data.navigation?.timeline)?.updated_at ?? ''}`;
 
   const seek = (time: number) => {
     setSelectedTime(time);
@@ -180,14 +180,17 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
           <div><span className="section-eyebrow">Explore this video</span><h2>Choose your view</h2></div>
           <div className="view-switch" role="group" aria-label="Navigation view">
             {(['timeline', 'topics'] as const).map((item) => {
-              const saved = item === 'timeline' ? timeline.data : topics.data;
-              return <button key={item} className={item === view ? 'is-active' : ''} aria-pressed={item === view} onClick={() => setView(item)}>
-                {item === 'timeline' ? 'Timeline' : 'Topics'}<span>{saved?.status === 'completed' ? 'Ready' : isProcessing(saved?.status) ? 'Creating…' : 'Not created'}</span>
+              const saved = item === view ? analysis : data.navigation?.[item];
+              return <button key={item} className={item === view ? 'is-active' : ''} aria-pressed={item === view} onClick={() => {
+                if (item === view) void activeQuery.refetch();
+                else setView(item);
+              }}>
+                {item === 'timeline' ? 'Timeline' : 'Topics'}<span>{item === view && checking ? 'Checking…' : saved?.status === 'completed' ? 'Ready' : isProcessing(saved?.status) ? 'Creating…' : 'Not created'}</span>
               </button>;
             })}
           </div>
         </div>
-        {activeQuery.isLoading && <p className="nav-loading" role="status">Checking saved {viewLabel.toLowerCase()}…</p>}
+        {checking && <p className="nav-loading" role="status">Checking saved {viewLabel.toLowerCase()}…</p>}
         {activeQuery.isError && <p className="nav-error" role="alert">Could not load this view: {activeQuery.error.message} <button className="nav-link" onClick={() => activeQuery.refetch()}>Try again</button></p>}
         {analysis?.status === 'completed' && (needsSubtopicSummaries(analysis.nodes) || (summaryUpdate.isPending && summaryUpdate.variables === view)) && <div className="subtopic-summary-update">
           <button className="nav-button compact" disabled={summaryUpdate.isPending} onClick={updateSummaries}>{summaryUpdate.isPending && summaryUpdate.variables === view ? 'Updating summaries…' : 'Update summaries'}</button>
@@ -198,7 +201,7 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
           <NavigationCanvas analysis={analysis} duration={duration} currentTime={currentTime} selected={selected} onSelect={selectPassage}
             timelineSelection={timelineSelection.analysisKey === timelineAnalysisKey ? timelineSelection.ids : []}
             onTimelineSelectionChange={(ids) => setTimelineSelection({ analysisKey: timelineAnalysisKey, ids })} />
-        ) : !activeQuery.isLoading && !activeQuery.isError ? <div className="creation-state">
+        ) : !checking && !activeQuery.isError ? <div className="creation-state">
           <span className="view-icon" aria-hidden="true">{view === 'timeline' ? '▥' : '≋'}</span>
           <h3>{view === 'timeline' ? 'See how the discussion unfolds' : 'Find subjects wherever they recur'}</h3>
           <p>{view === 'timeline' ? 'Create chronological chapters and nested subtopics. Keep the chapter overview visible while selecting subtopics to explore.' : 'Create a hierarchy of subjects and subtopics. See every level together, with each occurrence mapped across the video.'}</p>

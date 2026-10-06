@@ -177,7 +177,7 @@ def get_storage_backend(backend: Optional[str] = None) -> Literal["sqlite", "jso
     return "sqlite"
 
 
-def get_storage_path(backend: Optional[str] = None) -> str:
+def get_storage_path(backend: Optional[str] = None, *, create_directory: bool = True) -> str:
     """
     Get storage file path based on backend type.
 
@@ -187,6 +187,8 @@ def get_storage_path(backend: Optional[str] = None) -> str:
 
     Args:
         backend: Storage backend type ("sqlite" or "json")
+        create_directory: Create the default data directory for normal storage use.
+            Set to False for read-only discovery.
 
     Returns:
         Path to storage file
@@ -202,9 +204,9 @@ def get_storage_path(backend: Optional[str] = None) -> str:
     if backend is None:
         backend = get_storage_backend()
 
-    # Ensure data directory exists
     data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
+    if create_directory:
+        data_dir.mkdir(exist_ok=True)
 
     # Return default path based on backend
     if backend == "json":
