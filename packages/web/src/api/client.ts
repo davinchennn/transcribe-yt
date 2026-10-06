@@ -11,6 +11,7 @@ export interface Job {
   provider: string | null;
   created_at: string;
   updated_at: string;
+  video_available: boolean;
 }
 
 export interface Word {
@@ -30,6 +31,7 @@ export interface Utterance {
 
 export interface Transcript {
   video_url: string;
+  video_available: boolean;
   title: string;
   duration: number | null;
   transcript_text: string;
@@ -52,6 +54,52 @@ export interface JobDetail {
   job: Job;
   transcript: Transcript | null;
   analysis: Analysis | null;
+  navigation?: Partial<Record<NavigationView, NavigationAnalysis | null>>;
+}
+
+export type NavigationView = 'timeline' | 'topics';
+export type SearchMode = 'exact' | 'semantic';
+
+export interface Passage {
+  id: string;
+  start: number;
+  end: number;
+  text: string;
+  utterance_start: number;
+  utterance_end: number;
+  word_start?: number | null;
+  word_end?: number | null;
+  match_start?: number | null;
+  match_end?: number | null;
+}
+
+export interface NavigationNode {
+  id: string;
+  title: string;
+  summary: string | null;
+  start: number;
+  end: number;
+  children: NavigationNode[];
+  occurrences: Passage[];
+}
+
+export interface NavigationAnalysis {
+  job_id: string;
+  view: NavigationView;
+  status: string;
+  summary: string | null;
+  nodes: NavigationNode[];
+  model: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SearchResponse {
+  query: string;
+  mode: SearchMode;
+  results: Passage[];
+  error: string | null;
 }
 
 export interface JobListResponse {
@@ -104,6 +152,10 @@ export async function getJob(id: string): Promise<JobDetail> {
   return fetchJson(`${API_BASE}/jobs/${id}`);
 }
 
+export function getVideoUrl(id: string): string {
+  return `${API_BASE}/jobs/${encodeURIComponent(id)}/video`;
+}
+
 export async function retryJob(id: string): Promise<Job> {
   return fetchJson(`${API_BASE}/jobs/${id}/retry`, {
     method: 'POST',
@@ -126,5 +178,24 @@ export async function clearJobs(stage?: string): Promise<{ cleared: number }> {
 export async function analyzeJob(id: string): Promise<Analysis> {
   return fetchJson(`${API_BASE}/jobs/${id}/analyze`, {
     method: 'POST',
+  });
+}
+
+export async function getNavigation(id: string, view: NavigationView): Promise<NavigationAnalysis | null> {
+  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}`);
+}
+
+export async function createNavigation(id: string, view: NavigationView): Promise<NavigationAnalysis> {
+  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}`, { method: 'POST' });
+}
+
+export async function updateNavigationSummaries(id: string, view: NavigationView): Promise<NavigationAnalysis> {
+  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}/summaries`, { method: 'POST' });
+}
+
+export async function searchTranscript(id: string, query: string, mode: SearchMode): Promise<SearchResponse> {
+  return fetchJson(`${API_BASE}/jobs/${id}/search`, {
+    method: 'POST',
+    body: JSON.stringify({ query, mode }),
   });
 }

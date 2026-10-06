@@ -1,352 +1,239 @@
-import React from 'react';
-import { useJob, useAnalyzeJob } from '../hooks/useJobs';
+import { useRef, useState } from 'react';
+import { useMutation } from '@tanstack/react-query';
+import type { FormEvent } from 'react';
+import type { JobDetail, NavigationNode, NavigationView, Passage, SearchMode, Transcript } from '../api/client';
+import { searchTranscript } from '../api/client';
+import { useAnalyzeJob, useCreateNavigation, useJob, useNavigation, useUpdateNavigationSummaries } from '../hooks/useJobs';
+import { formatTime, passageUtterances, passageWords, selectedWords, transcriptDuration } from '../lib/navigation';
+import { isXVideoUrl } from '../lib/video';
+import { NavigationCanvas } from './NavigationCanvas';
+import { NativeVideoPlayer } from './NativeVideoPlayer';
+import { YouTubePlayer } from './YouTubePlayer';
+import type { VideoHandle } from './YouTubePlayer';
 
-interface TranscriptViewProps {
-  jobId: string;
-  onClose: () => void;
-}
+interface TranscriptViewProps { jobId: string; onClose: () => void }
 
-const speakerColors = [
-  '#818cf8', // indigo
-  '#34d399', // emerald
-  '#fb923c', // orange
-  '#f472b6', // pink
-  '#38bdf8', // sky
-  '#a78bfa', // violet
-  '#fbbf24', // amber
-  '#2dd4bf', // teal
-];
-
-function getSpeakerColor(speaker: string, speakerMap: Map<string, string>): string {
-  if (!speakerMap.has(speaker)) {
-    speakerMap.set(speaker, speakerColors[speakerMap.size % speakerColors.length]);
-  }
-  return speakerMap.get(speaker)!;
-}
-
-function formatTimestamp(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-function isAnalysisInProgress(status?: string): boolean {
+function isProcessing(status?: string): boolean {
   return status === 'pending' || status === 'processing';
 }
 
-export function TranscriptView({ jobId, onClose }: TranscriptViewProps) {
-  const [polling, setPolling] = React.useState(false);
-  const { data, isLoading, error } = useJob(jobId, polling ? 2000 : false);
-  const analyzeMutation = useAnalyzeJob();
+function needsSubtopicSummaries(nodes: NavigationNode[], depth = 0): boolean {
+  return nodes.some((node) => {
+    const words = node.summary?.trim().split(/\s+/).filter(Boolean).length ?? 0;
+    return (depth > 0 && (words === 0 || words > 20))
+      || needsSubtopicSummaries(node.children, depth + 1);
+  });
+}
 
-  // Start/stop polling based on analysis status
-  React.useEffect(() => {
-    setPolling(isAnalysisInProgress(data?.analysis?.status));
-  }, [data?.analysis?.status]);
+function PassageDetail({ transcript, passage, currentTime, onSeek }: {
+  transcript: Transcript; passage: Passage | null; currentTime: number; onSeek: (time: number) => void;
+}) {
+  if (!passage) return (
+    <aside className="passage-panel nav-panel">
+      <span className="section-eyebrow">Selected passage</span>
+      <h2>Start with a topic or a search</h2>
+      <p>Select a passage from the timeline, topic tracks, or search results to read its words and navigate the video.</p>
+    </aside>
+  );
+  const utterances = passageUtterances(transcript, passage);
+  const words = selectedWords(transcript, passage);
+  return (
+    <aside className="passage-panel nav-panel" aria-label="Selected transcript passage">
+      <div className="passage-heading">
+        <span className="section-eyebrow">Selected passage</span>
+        <button className="nav-link" onClick={() => onSeek(passage.start)} aria-label={`Seek to passage start at ${formatTime(passage.start)}`}>{formatTime(passage.start)}–{formatTime(passage.end)} ↗</button>
+      </div>
+      <div className="passage-body">
+        {utterances.length > 0 && words.length > 0 ? utterances.map((utterance, index) => {
+          const utteranceWords = passageWords(words, Math.max(utterance.start, passage.start), Math.min(utterance.end, passage.end));
+          if (utteranceWords.length === 0) return null;
+          return <div className="passage-utterance" key={`${utterance.start}-${index}`}>
+            <div className="passage-speaker"><span>{utterance.speaker || 'Speaker'}</span><span>{formatTime(Math.max(utterance.start, passage.start))}</span></div>
+            <p>{utteranceWords.length > 0 ? utteranceWords.map((word, wordIndex) => <span key={`${word.start}-${wordIndex}`}>
+              <button className={`transcript-word ${currentTime >= word.start && currentTime < word.end ? 'is-current' : ''}`} title={`Seek to ${formatTime(word.start)}`} onClick={() => onSeek(word.start)}>{word.text}</button>{' '}
+            </span>) : passage.text}</p>
+          </div>;
+        }) : <p>{passage.text}</p>}
+      </div>
+      <p className="navigation-hint">Click a word to seek. Playback keeps its playing or paused state.</p>
+    </aside>
+  );
+}
 
-  const handleCopy = () => {
-    if (data?.transcript) {
-      navigator.clipboard.writeText(data.transcript.transcript_text);
+function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcript } }) {
+  const { job, transcript } = data;
+  const [view, setView] = useState<NavigationView>('timeline');
+  const [timelineSelection, setTimelineSelection] = useState<{ analysisKey: string; ids: string[] }>({ analysisKey: '', ids: [] });
+  const [selected, setSelected] = useState<Passage | null>(null);
+  const [selectedTime, setSelectedTime] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [query, setQuery] = useState('');
+  const [searchMode, setSearchMode] = useState<SearchMode>('exact');
+  const [copyMessage, setCopyMessage] = useState('');
+  const video = useRef<VideoHandle>(null);
+  const timeline = useNavigation(job.id, 'timeline', data.navigation?.timeline);
+  const topics = useNavigation(job.id, 'topics', data.navigation?.topics);
+  const creation = useCreateNavigation(job.id);
+  const summaryUpdate = useUpdateNavigationSummaries(job.id);
+  const summaryMutation = useAnalyzeJob();
+  const search = useMutation({ mutationFn: ({ query, mode }: { query: string; mode: SearchMode }) => searchTranscript(job.id, query, mode) });
+  const activeQuery = view === 'timeline' ? timeline : topics;
+  const analysis = activeQuery.data;
+  const creating = (creation.isPending && creation.variables === view) || isProcessing(analysis?.status);
+  const duration = transcriptDuration(transcript);
+  const viewLabel = view === 'timeline' ? 'Timeline' : 'Topics';
+  const timelineAnalysisKey = `${job.id}:${timeline.data?.updated_at ?? ''}`;
+
+  const seek = (time: number) => {
+    setSelectedTime(time);
+    video.current?.seek(time);
+  };
+  const selectPassage = (passage: Passage) => {
+    setSelected(passage);
+    seek(passage.match_start ?? passage.start);
+  };
+  const createView = () => {
+    creation.reset();
+    creation.mutate(view);
+  };
+  const updateSummaries = () => {
+    summaryUpdate.reset();
+    summaryUpdate.mutate(view, {
+      onSuccess: (updated) => {
+        if (updated.view === 'timeline') {
+          setTimelineSelection((previous) => ({ ...previous, analysisKey: `${job.id}:${updated.updated_at}` }));
+        }
+      },
+    });
+  };
+  const submitSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (query.trim()) search.mutate({ query: query.trim(), mode: searchMode });
+  };
+  const copyTranscript = async () => {
+    try {
+      await navigator.clipboard.writeText(transcript.transcript_text);
+      setCopyMessage('Transcript copied');
+    } catch {
+      setCopyMessage('Copy failed. Download the transcript instead.');
     }
   };
-
-  const handleDownload = (format: 'txt' | 'json') => {
-    if (!data?.transcript) return;
-
-    let content: string;
-    let filename: string;
-    let type: string;
-
-    if (format === 'json') {
-      content = JSON.stringify(data.transcript, null, 2);
-      filename = `${data.job.title || data.job.id}.json`;
-      type = 'application/json';
-    } else {
-      content = data.transcript.utterances
-        .map((u) => `[${u.speaker}]: ${u.text}`)
-        .join('\n\n');
-      filename = `${data.job.title || data.job.id}.txt`;
-      type = 'text/plain';
-    }
-
-    const blob = new Blob([content], { type });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+  const download = (format: 'txt' | 'json') => {
+    const content = format === 'json' ? JSON.stringify(transcript, null, 2) : transcript.utterances.map((u) => `[${formatTime(u.start)}] ${u.speaker}: ${u.text}`).join('\n\n');
+    const objectUrl = URL.createObjectURL(new Blob([content], { type: format === 'json' ? 'application/json' : 'text/plain' }));
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = `${job.title || job.id}.${format}`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
   };
-
-  const speakerMap = new Map<string, string>();
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-10 animate-fade-in">
-      {/* Top bar */}
-      <div className="flex items-center justify-between mb-8">
-        <button
-          onClick={onClose}
-          className="flex items-center gap-2 text-sm font-medium transition-colors cursor-pointer"
-          style={{ color: 'var(--text-secondary)' }}
-          onMouseEnter={(e) => e.currentTarget.style.color = 'var(--text-primary)'}
-          onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-secondary)'}
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-          </svg>
-          Back
-        </button>
+    <>
+      <div className="transcript-toolbar">
+        <span>{formatTime(duration)} · {transcript.utterances.length} turns</span>
+        <div className="transcript-actions">
+          <button className="nav-button compact" onClick={copyTranscript}>Copy transcript</button>
+          <button className="nav-button compact" onClick={() => download('txt')}>Download TXT</button>
+          <button className="nav-button compact" onClick={() => download('json')}>Download JSON</button>
+        </div>
+      </div>
+      {copyMessage && <p className="navigation-hint" role="status">{copyMessage}</p>}
 
-        {data?.transcript && (
-          <div className="flex gap-2">
-            {(!data.analysis || data.analysis.status === 'failed') && (
-              <button
-                onClick={() => { analyzeMutation.mutate(jobId); setPolling(true); }}
-                disabled={analyzeMutation.isPending}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer"
-                style={{
-                  color: '#818cf8',
-                  borderColor: '#818cf8',
-                  backgroundColor: 'transparent',
-                  opacity: analyzeMutation.isPending ? 0.5 : 1,
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = 'rgba(129,140,248,0.1)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = 'transparent';
-                }}
-              >
-                {analyzeMutation.isPending ? 'Starting...' : data.analysis?.status === 'failed' ? 'Retry Analysis' : 'Analyze'}
-              </button>
-            )}
-            <button
-              onClick={handleCopy}
-              className="px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer"
-              style={{
-                color: 'var(--text-secondary)',
-                borderColor: 'var(--border)',
-                backgroundColor: 'var(--bg-surface)',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.borderColor = 'var(--border-bright)';
-                e.currentTarget.style.backgroundColor = 'var(--bg-elevated)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = 'var(--border)';
-                e.currentTarget.style.backgroundColor = 'var(--bg-surface)';
-              }}
-            >
-              Copy
-            </button>
-            <button
-              onClick={() => handleDownload('txt')}
-              className="px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer"
-              style={{
-                color: 'var(--text-secondary)',
-                borderColor: 'var(--border)',
-                backgroundColor: 'var(--bg-surface)',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.borderColor = 'var(--border-bright)';
-                e.currentTarget.style.backgroundColor = 'var(--bg-elevated)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = 'var(--border)';
-                e.currentTarget.style.backgroundColor = 'var(--bg-surface)';
-              }}
-            >
-              Download TXT
-            </button>
-            <button
-              onClick={() => handleDownload('json')}
-              className="px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer"
-              style={{
-                color: 'var(--text-secondary)',
-                borderColor: 'var(--border)',
-                backgroundColor: 'var(--bg-surface)',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.borderColor = 'var(--border-bright)';
-                e.currentTarget.style.backgroundColor = 'var(--bg-elevated)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = 'var(--border)';
-                e.currentTarget.style.backgroundColor = 'var(--bg-surface)';
-              }}
-            >
-              Download JSON
-            </button>
-          </div>
-        )}
+      <div className="watch-layout">
+        {isXVideoUrl(job.url)
+          ? <NativeVideoPlayer ref={video} jobId={job.id} url={job.url} title={job.title || 'X video'} available={transcript.video_available ?? job.video_available ?? false} selectedTime={selectedTime} onTimeChange={setCurrentTime} />
+          : <YouTubePlayer ref={video} url={job.url} title={job.title || 'YouTube video'} selectedTime={selectedTime} onTimeChange={setCurrentTime} />}
+        <PassageDetail transcript={transcript} passage={selected} currentTime={currentTime} onSeek={seek} />
       </div>
 
-      {/* Loading */}
-      {isLoading && (
-        <div className="py-20">
-          <div className="skeleton h-8 w-2/3 mb-3 mx-auto" />
-          <div className="skeleton h-4 w-1/3 mb-12 mx-auto" />
-          <div className="space-y-6">
-            {[...Array(5)].map((_, i) => (
-              <div key={i}>
-                <div className="skeleton h-3 w-24 mb-2" />
-                <div className="skeleton h-4 w-full mb-1" />
-                <div className="skeleton h-4 w-3/4" />
-              </div>
-            ))}
+      <section className="nav-panel search-panel" aria-label="Search this video">
+        <form onSubmit={submitSearch} className="transcript-search">
+          <div className="search-input-group">
+            <label htmlFor="transcript-search" className="section-eyebrow">Find something you remember</label>
+            <input id="transcript-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchMode === 'exact' ? 'Words or a phrase from this video…' : 'Describe an idea, e.g. why growth slowed…'} />
+          </div>
+          <div className="search-controls">
+            <label className="sr-only" htmlFor="search-mode">Search mode</label>
+            <select id="search-mode" value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
+              <option value="exact">Exact words</option><option value="semantic">Meaning</option>
+            </select>
+            <button className="nav-button primary" type="submit" disabled={search.isPending || !query.trim()}>{search.isPending ? 'Searching…' : 'Search'}</button>
+            {(search.data || search.isError) && <button className="nav-button compact" type="button" onClick={() => search.reset()}>Clear results</button>}
+          </div>
+        </form>
+        {search.isPending && <p role="status" className="navigation-hint">Finding passages in this video…</p>}
+        {search.isError && <p className="nav-error" role="alert">{search.error.message}</p>}
+        {search.data && <div className="search-results">
+          <p className="navigation-hint" role="status">{search.data.results.length} passage{search.data.results.length === 1 ? '' : 's'} for “{search.data.query}” · {search.data.mode === 'semantic' ? 'Meaning' : 'Exact words'}</p>
+          {search.data.error && <p className="nav-error" role="alert">{search.data.error}</p>}
+          {search.data.results.map((passage) => <button key={passage.id} className={`search-result ${selected?.id === passage.id ? 'is-selected' : ''}`} onClick={() => selectPassage(passage)}>
+            <span className="tile-time">{formatTime(passage.start)}–{formatTime(passage.end)} ↗</span>
+            <span>{passage.text}</span>
+          </button>)}
+          {search.data.results.length === 0 && !search.data.error && <p className="nav-empty">No passages found. Try different words or switch to Meaning.</p>}
+        </div>}
+      </section>
+
+      <section className="nav-panel exploration-panel" aria-label="Explore this video">
+        <div className="exploration-header">
+          <div><span className="section-eyebrow">Explore this video</span><h2>Choose your view</h2></div>
+          <div className="view-switch" role="group" aria-label="Navigation view">
+            {(['timeline', 'topics'] as const).map((item) => {
+              const saved = item === 'timeline' ? timeline.data : topics.data;
+              return <button key={item} className={item === view ? 'is-active' : ''} aria-pressed={item === view} onClick={() => setView(item)}>
+                {item === 'timeline' ? 'Timeline' : 'Topics'}<span>{saved?.status === 'completed' ? 'Ready' : isProcessing(saved?.status) ? 'Creating…' : 'Not created'}</span>
+              </button>;
+            })}
           </div>
         </div>
-      )}
+        {activeQuery.isLoading && <p className="nav-loading" role="status">Checking saved {viewLabel.toLowerCase()}…</p>}
+        {activeQuery.isError && <p className="nav-error" role="alert">Could not load this view: {activeQuery.error.message} <button className="nav-link" onClick={() => activeQuery.refetch()}>Try again</button></p>}
+        {analysis?.status === 'completed' && (needsSubtopicSummaries(analysis.nodes) || (summaryUpdate.isPending && summaryUpdate.variables === view)) && <div className="subtopic-summary-update">
+          <button className="nav-button compact" disabled={summaryUpdate.isPending} onClick={updateSummaries}>{summaryUpdate.isPending && summaryUpdate.variables === view ? 'Updating summaries…' : 'Update summaries'}</button>
+          <span className="navigation-hint">20 words or fewer per subtopic, using terms from this transcript.</span>
+        </div>}
+        {summaryUpdate.isError && summaryUpdate.variables === view && <p className="nav-error" role="alert">Could not update subtopic summaries: {summaryUpdate.error.message}</p>}
+        {creating ? <div className="creation-state" role="status" aria-live="polite"><span className="creation-spinner" /><h3>Creating {viewLabel.toLowerCase()}…</h3><p>Analyzing this transcript. The view will appear here when it is ready.</p></div> : analysis?.status === 'completed' ? (
+          <NavigationCanvas analysis={analysis} duration={duration} currentTime={currentTime} selected={selected} onSelect={selectPassage}
+            timelineSelection={timelineSelection.analysisKey === timelineAnalysisKey ? timelineSelection.ids : []}
+            onTimelineSelectionChange={(ids) => setTimelineSelection({ analysisKey: timelineAnalysisKey, ids })} />
+        ) : !activeQuery.isLoading && !activeQuery.isError ? <div className="creation-state">
+          <span className="view-icon" aria-hidden="true">{view === 'timeline' ? '▥' : '≋'}</span>
+          <h3>{view === 'timeline' ? 'See how the discussion unfolds' : 'Find subjects wherever they recur'}</h3>
+          <p>{view === 'timeline' ? 'Create chronological chapters and nested subtopics. Keep the chapter overview visible while selecting subtopics to explore.' : 'Create a hierarchy of subjects and subtopics. See every level together, with each occurrence mapped across the video.'}</p>
+          {(analysis?.status === 'failed' || (creation.isError && creation.variables === view)) && <p className="nav-error" role="alert">{analysis?.error || creation.error?.message || 'Analysis failed. Try again.'}</p>}
+          <button className="nav-button primary" onClick={createView} disabled={creation.isPending}>{analysis?.status === 'failed' ? `Retry ${viewLabel}` : `Create ${viewLabel}`}</button>
+          <span className="navigation-hint">Created only when you ask. Saved for this video.</span>
+        </div> : null}
+      </section>
 
-      {/* Error */}
-      {error && (
-        <div className="text-center py-20" style={{ color: 'var(--status-failed)' }}>
-          Error loading transcript: {error.message}
-        </div>
-      )}
+      <details className="nav-panel summary-panel">
+        <summary>Video summary</summary>
+        {data.analysis?.status === 'completed' ? <>
+          <p>{data.analysis.summary}</p>
+          {data.analysis.key_points.length > 0 && <ul>{data.analysis.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul>}
+        </> : isProcessing(data.analysis?.status) ? <p role="status">Analyzing summary…</p> : <>
+          {data.analysis?.error && <p className="nav-error" role="alert">{data.analysis.error}</p>}
+          {summaryMutation.isError && <p className="nav-error" role="alert">{summaryMutation.error.message}</p>}
+          <button className="nav-button compact" disabled={summaryMutation.isPending} onClick={() => summaryMutation.mutate(job.id)}>{summaryMutation.isPending ? 'Starting…' : data.analysis?.status === 'failed' ? 'Retry summary' : 'Create summary'}</button>
+        </>}
+      </details>
+    </>
+  );
+}
 
-      {/* Content */}
-      {data && (
-        <>
-          {/* Header */}
-          <div className="mb-8">
-            <h1 className="text-2xl font-bold mb-1" style={{ color: 'var(--text-primary)' }}>
-              {data.job.title || 'Untitled'}
-            </h1>
-            <a
-              href={data.job.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm font-mono transition-colors"
-              style={{ color: 'var(--text-muted)' }}
-              onMouseEnter={(e) => e.currentTarget.style.color = 'var(--accent)'}
-              onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
-            >
-              {data.job.url}
-            </a>
-          </div>
-
-          {/* Analysis section */}
-          {data.analysis && (
-            <div
-              className="rounded-xl border p-6 mb-8"
-              style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border)' }}
-            >
-              {/* Pending / Processing */}
-              {isAnalysisInProgress(data.analysis.status) && (
-                <div className="flex items-center gap-3">
-                  <span className="relative flex h-2.5 w-2.5">
-                    <span
-                      className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
-                      style={{ backgroundColor: '#818cf8' }}
-                    />
-                    <span
-                      className="relative inline-flex rounded-full h-2.5 w-2.5"
-                      style={{ backgroundColor: '#818cf8' }}
-                    />
-                  </span>
-                  <span className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-                    Analyzing transcript...
-                  </span>
-                </div>
-              )}
-
-              {/* Failed */}
-              {data.analysis.status === 'failed' && (
-                <div className="text-sm" style={{ color: 'var(--status-failed)' }}>
-                  Analysis failed: {data.analysis.error}
-                </div>
-              )}
-
-              {/* Completed */}
-              {data.analysis.status === 'completed' && (
-                <div>
-                  <h3
-                    className="text-sm font-semibold uppercase tracking-wider mb-4"
-                    style={{ color: 'var(--text-muted)' }}
-                  >
-                    Analysis
-                  </h3>
-                  {data.analysis.summary && (
-                    <p className="text-sm leading-relaxed mb-4" style={{ color: 'var(--text-secondary)' }}>
-                      {data.analysis.summary}
-                    </p>
-                  )}
-                  {data.analysis.key_points.length > 0 && (
-                    <ul className="space-y-1.5 mb-4">
-                      {data.analysis.key_points.map((point, i) => (
-                        <li key={i} className="flex gap-2 text-sm" style={{ color: 'var(--text-secondary)' }}>
-                          <span style={{ color: 'var(--text-muted)' }}>&#8226;</span>
-                          {point}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {data.analysis.model && (
-                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                      Model: {data.analysis.model}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Video player slot (future) */}
-          {/* <div className="rounded-xl border mb-8" style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border)' }}>
-            <div className="aspect-video flex items-center justify-center" style={{ color: 'var(--text-muted)' }}>
-              Video player placeholder
-            </div>
-          </div> */}
-
-          {/* Visualizations slot (future) */}
-          {/* <div className="rounded-xl border p-6 mb-8" style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border)' }}>
-            <div className="h-24 flex items-center justify-center" style={{ color: 'var(--text-muted)' }}>
-              Speaker timeline / visualizations placeholder
-            </div>
-          </div> */}
-
-          {/* Transcript */}
-          {data.transcript ? (
-            <div>
-              <h2 className="text-sm font-semibold uppercase tracking-wider mb-6" style={{ color: 'var(--text-muted)' }}>
-                Transcript
-              </h2>
-              <div
-                className="border-t"
-                style={{ borderColor: 'var(--border)' }}
-              >
-                {data.transcript.utterances.map((utterance, i) => {
-                  const color = getSpeakerColor(utterance.speaker, speakerMap);
-                  return (
-                    <div
-                      key={i}
-                      className="py-4 border-b"
-                      style={{ borderColor: 'var(--border)' }}
-                    >
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <span className="text-xs font-medium" style={{ color }}>
-                          {utterance.speaker}
-                        </span>
-                        <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>
-                          {formatTimestamp(utterance.start)}
-                        </span>
-                      </div>
-                      <p className="text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
-                        {utterance.text}
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            <div className="text-center py-20" style={{ color: 'var(--text-muted)' }}>
-              No transcript available
-            </div>
-          )}
-        </>
-      )}
-    </div>
+export function TranscriptView({ jobId, onClose }: TranscriptViewProps) {
+  const { data, isLoading, error } = useJob(jobId);
+  return (
+    <main className="transcript-page animate-fade-in">
+      <button className="transcript-back" onClick={onClose}>← Back to transcripts</button>
+      {isLoading && <div className="transcript-loading" role="status"><div className="skeleton h-8 w-2/3 mb-6" /><div className="skeleton h-72 w-full" /><span className="sr-only">Loading transcript</span></div>}
+      {error && <p className="nav-error" role="alert">Error loading transcript: {error.message}</p>}
+      {data && <>
+        <header className="transcript-header"><h1>{data.job.title || 'Untitled video'}</h1><a href={data.job.url} target="_blank" rel="noopener noreferrer">{data.job.url} ↗</a></header>
+        {data.transcript ? <TranscriptWorkspace key={jobId} data={{ ...data, transcript: data.transcript }} /> : <p className="nav-empty">No transcript available.</p>}
+      </>}
+    </main>
   );
 }

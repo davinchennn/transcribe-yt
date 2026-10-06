@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../api/client';
-import type { CreateJobOptions } from '../api/client';
+import type { CreateJobOptions, NavigationAnalysis, NavigationView } from '../api/client';
 
 export function useJobs() {
   return useQuery({
@@ -15,7 +15,45 @@ export function useJob(id: string | null, refetchInterval?: number | false) {
     queryKey: ['job', id],
     queryFn: () => (id ? api.getJob(id) : null),
     enabled: !!id,
-    refetchInterval: refetchInterval,
+    refetchInterval: refetchInterval ?? ((query) => {
+      const status = query.state.data?.analysis?.status;
+      return status === 'pending' || status === 'processing' ? 2000 : false;
+    }),
+  });
+}
+
+export function useNavigation(id: string, view: NavigationView, initialData?: NavigationAnalysis | null) {
+  return useQuery({
+    queryKey: ['navigation', id, view],
+    queryFn: () => api.getNavigation(id, view),
+    initialData,
+    staleTime: Infinity,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'pending' || status === 'processing' ? 2000 : false;
+    },
+  });
+}
+
+export function useCreateNavigation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (view: NavigationView) => api.createNavigation(id, view),
+    onSuccess: (data, view) => {
+      queryClient.setQueryData(['navigation', id, view], data);
+      queryClient.invalidateQueries({ queryKey: ['job', id] });
+    },
+  });
+}
+
+export function useUpdateNavigationSummaries(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (view: NavigationView) => api.updateNavigationSummaries(id, view),
+    onSuccess: (data, view) => {
+      queryClient.setQueryData(['navigation', id, view], data);
+      queryClient.invalidateQueries({ queryKey: ['job', id] });
+    },
   });
 }
 

@@ -54,7 +54,7 @@ export function JobList({ onSelectJob }: JobListProps) {
           No transcription jobs yet
         </p>
         <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
-          Paste a YouTube URL above to get started
+          Paste a YouTube or X video URL above to get started
         </p>
       </div>
     );

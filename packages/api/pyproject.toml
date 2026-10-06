@@ -13,6 +13,7 @@ requires-python = ">=3.8.1"
 dependencies = [
     "transcripts",
     "fastapi>=0.109.0",
+    "starlette>=0.39.0",  # FileResponse byte ranges for native video seeking
     "uvicorn[standard]>=0.27.0",
 ]
 

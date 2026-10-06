@@ -2,12 +2,22 @@
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from transcripts.models import Job, Stage, Transcript, Word, Utterance, derive_utterances, Analysis, AnalysisStatus
+from transcripts.models import Job, Stage, Transcript, Word, Utterance, derive_utterances, Analysis, AnalysisStatus, NavigationAnalysis
 from transcripts.storage.base import StorageBackend, extract_video_id
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """Commit/rollback a context-managed transaction and then release its handle."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 class SQLiteStorage(StorageBackend):
@@ -28,7 +38,7 @@ class SQLiteStorage(StorageBackend):
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection with row factory."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -77,7 +87,7 @@ class SQLiteStorage(StorageBackend):
                     job_id TEXT UNIQUE NOT NULL,
                     video_url TEXT NOT NULL,
                     title TEXT,
-                    duration INTEGER,
+                    duration REAL,
                     transcript_text TEXT NOT NULL,
                     words TEXT,
                     utterances TEXT,
@@ -141,6 +151,23 @@ class SQLiteStorage(StorageBackend):
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS navigation_analyses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    view TEXT NOT NULL CHECK(view IN ('timeline', 'topics')),
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    summary TEXT,
+                    nodes TEXT NOT NULL DEFAULT '[]',
+                    model TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(job_id, view),
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                )
+            """)
+
             conn.commit()
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
@@ -186,7 +213,7 @@ class SQLiteStorage(StorageBackend):
         """Create a new job or return existing one."""
         video_id = extract_video_id(url)
         if not video_id:
-            raise ValueError(f"Cannot extract video ID from URL: {url}")
+            raise ValueError(f"Unsupported video URL. Use a YouTube video or X post URL: {url}")
 
         # Check for existing job first
         existing = self.get_job(video_id)
@@ -317,6 +344,7 @@ class SQLiteStorage(StorageBackend):
     def delete_job(self, job_id: str) -> bool:
         """Delete a single job by ID."""
         with self._get_connection() as conn:
+            conn.execute("DELETE FROM navigation_analyses WHERE job_id = ?", (job_id,))
             cursor = conn.execute(
                 "DELETE FROM jobs WHERE id = ?", (job_id,)
             )
@@ -327,11 +355,16 @@ class SQLiteStorage(StorageBackend):
         """Clear jobs from state."""
         with self._get_connection() as conn:
             if filter_stage:
+                conn.execute(
+                    "DELETE FROM navigation_analyses WHERE job_id IN (SELECT id FROM jobs WHERE stage = ?)",
+                    (filter_stage.value,),
+                )
                 cursor = conn.execute(
                     "DELETE FROM jobs WHERE stage = ?",
                     (filter_stage.value,),
                 )
             else:
+                conn.execute("DELETE FROM navigation_analyses")
                 cursor = conn.execute("DELETE FROM jobs")
 
             conn.commit()
@@ -413,6 +446,18 @@ class SQLiteStorage(StorageBackend):
         metadata_json = json.dumps(transcript.metadata) if transcript.metadata else None
 
         with self._get_connection() as conn:
+            # Compare and invalidate in the same write transaction so a source
+            # replacement cannot leave navigation anchored to older word times.
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT transcript_text, words FROM transcripts WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if previous is not None and (
+                previous["transcript_text"] != transcript.transcript_text
+                or previous["words"] != words_json
+            ):
+                conn.execute("DELETE FROM navigation_analyses WHERE job_id = ?", (job_id,))
             conn.execute(
                 """
                 INSERT OR REPLACE INTO transcripts
@@ -622,5 +667,149 @@ class SQLiteStorage(StorageBackend):
             cursor = conn.execute(
                 "DELETE FROM analyses WHERE job_id = ?", (job_id,)
             )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    # Timeline and topic navigation are created and cached independently.
+
+    def save_navigation(self, analysis: NavigationAnalysis) -> None:
+        """Save a navigation result without replacing the other view."""
+        if analysis.view not in ("timeline", "topics"):
+            raise ValueError("Navigation view must be 'timeline' or 'topics'")
+        analysis.updated_at = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO navigation_analyses
+                (job_id, view, status, summary, nodes, model, error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id, view) DO UPDATE SET
+                    status = excluded.status, summary = excluded.summary,
+                    nodes = excluded.nodes, model = excluded.model,
+                    error = excluded.error, updated_at = excluded.updated_at
+                """,
+                (analysis.job_id, analysis.view, analysis.status.value,
+                 analysis.summary, json.dumps(analysis.nodes), analysis.model,
+                 analysis.error, analysis.created_at, analysis.updated_at),
+            )
+            analysis.created_at = conn.execute(
+                "SELECT created_at FROM navigation_analyses WHERE job_id = ? AND view = ?",
+                (analysis.job_id, analysis.view),
+            ).fetchone()["created_at"]
+            conn.commit()
+
+    def get_navigation(self, job_id: str, view: str) -> Optional[NavigationAnalysis]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM navigation_analyses WHERE job_id = ? AND view = ?",
+                (job_id, view),
+            ).fetchone()
+            if row is None:
+                return None
+            data = dict(row)
+            data["nodes"] = json.loads(row["nodes"])
+            return NavigationAnalysis.from_dict(data)
+
+    def save_navigation_if_current(
+        self, updated: NavigationAnalysis, expected: NavigationAnalysis, transcript: Transcript
+    ) -> bool:
+        """Atomically replace only subtopic summaries if cache and source match.
+
+        The source snapshot must come from get_transcript, whose utterances are
+        derived from stored words. Deleted or changed caches are never recreated.
+        """
+        previous = expected.to_dict()
+        replacement = updated.to_dict()
+        if expected.view not in ("timeline", "topics") or expected.status != AnalysisStatus.COMPLETED:
+            raise ValueError("Summary updates require a completed navigation view")
+        if any(previous[key] != replacement[key] for key in previous if key not in ("nodes", "updated_at")):
+            raise ValueError("Summary updates must preserve navigation metadata")
+        pending = [(expected.nodes, updated.nodes, 0)]
+        while pending:
+            old_nodes, new_nodes, depth = pending.pop()
+            if len(old_nodes) != len(new_nodes):
+                raise ValueError("Summary updates must preserve navigation hierarchy")
+            for old, new in zip(old_nodes, new_nodes):
+                ignored = {"children", "summary"} if depth else {"children"}
+                if {key: value for key, value in old.items() if key not in ignored} != {
+                    key: value for key, value in new.items() if key not in ignored
+                }:
+                    raise ValueError("Summary updates must preserve roots and source references")
+                pending.append((old.get("children", []), new.get("children", []), depth + 1))
+
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM navigation_analyses WHERE job_id = ? AND view = ?
+                   AND EXISTS (SELECT 1 FROM jobs WHERE id = ?)""",
+                (expected.job_id, expected.view, expected.job_id),
+            ).fetchone()
+            source_row = conn.execute(
+                "SELECT * FROM transcripts WHERE job_id = ?", (expected.job_id,),
+            ).fetchone()
+            if row is None or source_row is None:
+                return False
+            current = dict(row)
+            current["nodes"] = json.loads(row["nodes"])
+            if NavigationAnalysis.from_dict(current).to_dict() != previous:
+                return False
+            source = self._row_to_transcript(source_row)
+            if (
+                source.transcript_text != transcript.transcript_text
+                or source.words != transcript.words
+                or source.utterances != transcript.utterances
+            ):
+                return False
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                "UPDATE navigation_analyses SET nodes = ?, updated_at = ? WHERE job_id = ? AND view = ?",
+                (json.dumps(updated.nodes), now, expected.job_id, expected.view),
+            )
+            conn.commit()
+        updated.updated_at = now
+        return True
+
+    def claim_navigation(self, job_id: str, view: str) -> bool:
+        """Atomically reserve a view, allowing failed or abandoned requests to retry.
+
+        A live request refreshes its lease with lease_navigation. Reservations
+        untouched for 15 minutes can be recovered after an API restart.
+        """
+        if view not in ("timeline", "topics"):
+            raise ValueError("Navigation view must be 'timeline' or 'topics'")
+        now = datetime.utcnow().isoformat()
+        stale_before = (datetime.utcnow() - timedelta(minutes=15)).isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO navigation_analyses
+                (job_id, view, status, nodes, created_at, updated_at)
+                SELECT ?, ?, 'processing', '[]', ?, ?
+                WHERE EXISTS (SELECT 1 FROM jobs WHERE id = ?)
+                ON CONFLICT(job_id, view) DO UPDATE SET
+                    status = 'processing', error = NULL, updated_at = excluded.updated_at
+                WHERE navigation_analyses.status = 'failed'
+                    OR (navigation_analyses.status IN ('pending', 'processing')
+                        AND navigation_analyses.updated_at < ?)
+                """,
+                (job_id, view, now, now, job_id, stale_before),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def lease_navigation(self, job_id: str, view: str) -> bool:
+        """Refresh an existing processing reservation without recreating deleted rows."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """UPDATE navigation_analyses SET updated_at = ?
+                   WHERE job_id = ? AND view = ? AND status = 'processing'""",
+                (datetime.utcnow().isoformat(), job_id, view),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_navigation(self, job_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM navigation_analyses WHERE job_id = ?", (job_id,))
             conn.commit()
             return cursor.rowcount > 0

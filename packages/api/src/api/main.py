@@ -7,7 +7,7 @@ from api.routes import router
 
 app = FastAPI(
     title="Transcripts API",
-    description="API for YouTube video transcription",
+    description="API for YouTube and X video transcription",
     version="0.1.0",
 )
 

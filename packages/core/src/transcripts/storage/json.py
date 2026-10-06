@@ -93,7 +93,7 @@ class JSONStorage(StorageBackend):
         """Create a new job or return existing one."""
         video_id = extract_video_id(url)
         if not video_id:
-            raise ValueError(f"Cannot extract video ID from URL: {url}")
+            raise ValueError(f"Unsupported video URL. Use a YouTube video or X post URL: {url}")
 
         with self._lock:
             state = self._load()

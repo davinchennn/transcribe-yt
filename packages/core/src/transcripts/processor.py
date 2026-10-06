@@ -71,7 +71,7 @@ class TranscriptProcessor:
         processing will skip completed stages.
 
         Args:
-            url: YouTube video URL
+            url: YouTube video or X/Twitter post URL
             download_video: Whether to download the video file
             extract_audio: Whether to extract audio first.
                           If False, video file will be uploaded directly to the transcription provider
@@ -275,7 +275,7 @@ class TranscriptProcessor:
         Process multiple videos from a list of URLs.
 
         Args:
-            urls: List of YouTube video URLs
+            urls: List of YouTube video or X/Twitter post URLs
             download_video: Whether to download video files
             extract_audio: Whether to extract audio first.
                           If False, video files will be uploaded directly to the transcription provider
@@ -446,4 +446,3 @@ class TranscriptProcessor:
             except Exception as e:
                 # Log warning but don't fail the job
                 print(f"Warning: Failed to delete audio file: {e}")
-

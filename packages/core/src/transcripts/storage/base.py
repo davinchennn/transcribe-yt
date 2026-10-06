@@ -1,10 +1,10 @@
 """Abstract base class for storage backends."""
 
-import re
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
 from transcripts.models import Job, Stage
+from transcripts.sources import extract_video_id
 
 
 # Regex patterns for extracting YouTube video IDs
@@ -13,22 +13,6 @@ YOUTUBE_PATTERNS = [
     r"(?:embed/)([a-zA-Z0-9_-]{11})",
     r"(?:shorts/)([a-zA-Z0-9_-]{11})",
 ]
-
-
-def extract_video_id(url: str) -> Optional[str]:
-    """Extract YouTube video ID from various URL formats.
-
-    Args:
-        url: YouTube URL in any common format
-
-    Returns:
-        11-character video ID, or None if not found
-    """
-    for pattern in YOUTUBE_PATTERNS:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
 
 
 class StorageBackend(ABC):
@@ -43,7 +27,7 @@ class StorageBackend(ABC):
         """Get a job by video ID.
 
         Args:
-            job_id: YouTube video ID
+            job_id: Stable source video ID
 
         Returns:
             Job if found, None otherwise
@@ -55,7 +39,7 @@ class StorageBackend(ABC):
         """Get a job by URL.
 
         Args:
-            url: YouTube URL
+            url: YouTube video or X post URL
 
         Returns:
             Job if found, None otherwise
@@ -67,7 +51,7 @@ class StorageBackend(ABC):
         """Create a new job or return existing one.
 
         Args:
-            url: YouTube URL
+            url: YouTube video or X post URL
 
         Returns:
             New or existing Job

@@ -22,8 +22,8 @@ class Stage(Enum):
 class Job:
     """Represents a single transcription task with progress tracking."""
 
-    id: str  # YouTube video ID
-    url: str  # Original YouTube URL
+    id: str  # YouTube video ID or namespaced X post/video ID
+    url: str  # Original video/post URL
     stage: Stage = Stage.PENDING
     title: Optional[str] = None
     error: Optional[str] = None
@@ -146,6 +146,48 @@ class Analysis:
         )
 
 
+@dataclass
+class NavigationAnalysis:
+    """Independent, cached timeline or recurring-topic navigation for a video."""
+
+    job_id: str
+    view: str
+    status: AnalysisStatus = AnalysisStatus.PENDING
+    summary: Optional[str] = None
+    nodes: List[Dict[str, Any]] = field(default_factory=list)
+    model: Optional[str] = None
+    error: Optional[str] = None
+    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "view": self.view,
+            "status": self.status.value,
+            "summary": self.summary,
+            "nodes": self.nodes,
+            "model": self.model,
+            "error": self.error,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "NavigationAnalysis":
+        return cls(
+            job_id=data["job_id"],
+            view=data["view"],
+            status=AnalysisStatus(data.get("status", "pending")),
+            summary=data.get("summary"),
+            nodes=data.get("nodes", []),
+            model=data.get("model"),
+            error=data.get("error"),
+            created_at=data.get("created_at", datetime.utcnow().isoformat()),
+            updated_at=data.get("updated_at", datetime.utcnow().isoformat()),
+        )
+
+
 def derive_utterances(words: List["Word"], pause_threshold_ms: int = 1000) -> List[Utterance]:
     """
     Group words into utterances by speaker and pauses.
@@ -205,7 +247,7 @@ class Transcript:
 
     video_url: str
     title: str
-    duration: Optional[int] = None  # Duration in seconds
+    duration: Optional[float] = None  # Duration in seconds, including fractional seconds
     audio_file: Optional[str] = None
     video_file: Optional[str] = None
     transcript_text: str = ""
@@ -282,4 +324,3 @@ class Transcript:
             created_at=data.get("created_at", datetime.utcnow().isoformat()),
             metadata=data.get("metadata", {}),
         )
-

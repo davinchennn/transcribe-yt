@@ -71,15 +71,15 @@ def get_deepgram_api_key(api_key: Optional[str] = None) -> str:
     return api_key
 
 
-def get_moonshot_api_key(api_key: Optional[str] = None) -> str:
+def get_kimi_code_api_key(api_key: Optional[str] = None) -> str:
     """
-    Get Moonshot API key from parameter, environment variable, or .env file.
+    Get Kimi Code API key from parameter, environment variable, or .env file.
 
     Args:
         api_key: Optional API key to use directly
 
     Returns:
-        Moonshot API key
+        Kimi Code API key
 
     Raises:
         ValueError: If API key is not found
@@ -89,11 +89,11 @@ def get_moonshot_api_key(api_key: Optional[str] = None) -> str:
     if api_key:
         return api_key
 
-    api_key = os.getenv("MOONSHOT_API_KEY")
-    if not api_key:
+    api_key = os.getenv("KIMI_CODE_API_KEY")
+    if not api_key or api_key == "your_api_key_here":
         raise ValueError(
-            "Moonshot API key not found. "
-            "Set MOONSHOT_API_KEY environment variable or create a .env file."
+            "Kimi Code API key not found. "
+            "Set KIMI_CODE_API_KEY environment variable or create a .env file."
         )
 
     return api_key
@@ -211,4 +211,3 @@ def get_storage_path(backend: Optional[str] = None) -> str:
         return str(data_dir / "state.json")
     else:
         return str(data_dir / "transcripts.db")
-

@@ -28,7 +28,8 @@ export function SubmitForm() {
             type="text"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="Paste YouTube URL..."
+            placeholder="Paste YouTube or X video URL..."
+            aria-label="YouTube or X video URL"
             className="flex-1 px-4 py-2.5 rounded-lg text-sm border outline-none transition-colors"
             style={{
               backgroundColor: 'var(--bg-elevated)',
@@ -81,6 +82,9 @@ export function SubmitForm() {
             </span>
           )}
         </div>
+        <p className="mt-3 text-xs" style={{ color: 'var(--text-muted)' }}>
+          Public YouTube videos and X posts. An X post uses its first video; use a /video/N link to choose a specific media attachment. Keep video enabled for X playback and timestamp seeking.
+        </p>
       </div>
     </form>
   );

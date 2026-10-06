@@ -1,4 +1,4 @@
-"""Kimi (Moonshot AI) transcript analysis client."""
+"""Kimi Code transcript analysis client."""
 
 import json
 import urllib.request
@@ -6,11 +6,11 @@ import urllib.error
 from datetime import datetime
 from typing import Optional
 
-from transcripts.config import get_moonshot_api_key
+from transcripts.config import get_kimi_code_api_key
 from transcripts.models import Analysis, AnalysisStatus
 
-KIMI_BASE_URL = "https://api.moonshot.ai/v1"
-KIMI_MODEL = "moonshot-v1-128k"
+KIMI_BASE_URL = "https://api.kimi.com/coding/v1"
+KIMI_MODEL = "k3"
 
 SYSTEM_PROMPT = """You are a transcript analyst. Given a transcript, provide a concise analysis.
 
@@ -29,7 +29,7 @@ def analyze_transcript(transcript_text: str, job_id: str, api_key: Optional[str]
     Args:
         transcript_text: Full transcript text to analyze
         job_id: Job ID to associate the analysis with
-        api_key: Optional Moonshot API key (reads from env if not provided)
+        api_key: Optional Kimi Code API key (reads from env if not provided)
 
     Returns:
         Analysis object with results or error
@@ -44,7 +44,7 @@ def analyze_transcript(transcript_text: str, job_id: str, api_key: Optional[str]
     )
 
     try:
-        key = get_moonshot_api_key(api_key)
+        key = get_kimi_code_api_key(api_key)
     except ValueError as e:
         analysis.status = AnalysisStatus.FAILED
         analysis.error = str(e)
@@ -56,7 +56,7 @@ def analyze_transcript(transcript_text: str, job_id: str, api_key: Optional[str]
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": transcript_text},
         ],
-        "temperature": 0.3,
+        "temperature": 1,
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -65,6 +65,7 @@ def analyze_transcript(transcript_text: str, job_id: str, api_key: Optional[str]
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key}",
+            "User-Agent": "transcripts/0.1.0",
         },
         method="POST",
     )

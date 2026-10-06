@@ -62,7 +62,7 @@ class StateManager:
         """Create a new job or return existing one.
 
         Args:
-            url: YouTube video URL
+            url: YouTube video or X/Twitter post URL
             keep_video: Whether to retain video file after transcription (default: True)
             keep_audio: Whether to retain audio file after transcription (default: True)
 

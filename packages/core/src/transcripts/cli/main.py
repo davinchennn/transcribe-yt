@@ -38,13 +38,13 @@ def read_urls_from_file(filepath: str) -> List[str]:
 def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Download YouTube videos, extract audio, and generate transcripts using Deepgram (or AssemblyAI)"
+        description="Download YouTube or X/Twitter videos, extract audio, and generate transcripts using Deepgram (or AssemblyAI)"
     )
 
     parser.add_argument(
         "url",
         nargs="?",
-        help="YouTube video URL (required if not using --playlist or --file)",
+        help="YouTube video or X/Twitter post URL (required if not using --playlist or --file)",
     )
 
     parser.add_argument(

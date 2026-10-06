@@ -1,13 +1,26 @@
 """API routes for job management."""
 
-import re
-from typing import Optional
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+import asyncio
+import logging
+from pathlib import Path
+from typing import Literal, Optional
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
+from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from transcripts.state import StateManager
 from transcripts.processor import TranscriptProcessor
-from transcripts.models import Stage, Analysis, AnalysisStatus
+from transcripts.models import Stage, Analysis, AnalysisStatus, NavigationAnalysis
 from transcripts.analyzer import analyze_transcript
+from transcripts.navigation import (
+    analyze_navigation,
+    needs_subtopic_summaries,
+    summarize_subtopics,
+)
+from transcripts.search import search_transcript
+from transcripts.llm import LLMError
+from transcripts.sources import parse_video_source
+from transcripts.storage.base import extract_video_id
 
 from api.schemas import (
     AnalysisResponse,
@@ -19,12 +32,18 @@ from api.schemas import (
     WordResponse,
     UtteranceResponse,
     HealthResponse,
+    NavigationResponse,
+    PassageSearchRequest,
+    PassageSearchResponse,
 )
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 # Shared state manager instance
 _state_manager: Optional[StateManager] = None
+VIDEO_DIRECTORY = Path("downloads/videos")
+_summary_updates = {}
 
 
 def get_state_manager() -> StateManager:
@@ -44,19 +63,37 @@ def job_to_response(job) -> JobResponse:
         title=job.title,
         error=job.error,
         provider=job.provider,
+        video_available=video_file_path(job) is not None,
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
 
 
+def is_valid_video_url(url: str) -> bool:
+    """Accept supported YouTube video and X/Twitter post URLs."""
+    return extract_video_id(url) is not None
+
+
 def is_valid_youtube_url(url: str) -> bool:
-    """Check if URL is a valid YouTube URL."""
-    patterns = [
-        r'^https?://(www\.)?youtube\.com/watch\?v=[\w-]{11}',
-        r'^https?://youtu\.be/[\w-]{11}',
-        r'^https?://(www\.)?youtube\.com/shorts/[\w-]{11}',
-    ]
-    return any(re.match(p, url) for p in patterns)
+    """Keep the existing YouTube-only helper available to callers."""
+    source = parse_video_source(url)
+    return source is not None and source.provider == "youtube"
+
+
+def video_file_path(job) -> Optional[Path]:
+    """Find a completed job's retained video inside the download directory.
+
+    Resolving the directory first also supports moving downloads with a symlink.
+    Individual file paths cannot escape that directory.
+    """
+    if job.stage != Stage.COMPLETED or not job.keep_video or not job.video_file:
+        return None
+    try:
+        path = Path(job.video_file).resolve()
+        path.relative_to(VIDEO_DIRECTORY.resolve())
+        return path if path.is_file() else None
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -92,8 +129,8 @@ async def create_job(
     background_tasks: BackgroundTasks,
 ):
     """Create a new transcription job."""
-    if not is_valid_youtube_url(body.url):
-        raise HTTPException(400, "Invalid YouTube URL")
+    if not is_valid_video_url(body.url):
+        raise HTTPException(400, "Enter a valid YouTube video or X/Twitter post URL")
 
     state = get_state_manager()
     job = state.create_job(
@@ -139,9 +176,9 @@ async def get_job(job_id: str):
     if not job:
         raise HTTPException(404, "Job not found")
 
+    storage = state._storage
     transcript_response = None
     if job.stage == Stage.COMPLETED:
-        storage = state._storage
         if hasattr(storage, 'get_transcript'):
             transcript = storage.get_transcript(job_id)
             if transcript:
@@ -149,6 +186,7 @@ async def get_job(job_id: str):
                     video_url=transcript.video_url,
                     title=transcript.title,
                     duration=transcript.duration,
+                    video_available=video_file_path(job) is not None,
                     transcript_text=transcript.transcript_text,
                     words=[
                         WordResponse(
@@ -187,11 +225,30 @@ async def get_job(job_id: str):
                 updated_at=analysis.updated_at,
             )
 
+    navigation = {}
+    if hasattr(storage, 'get_navigation'):
+        for view in ("timeline", "topics"):
+            result = storage.get_navigation(job_id, view)
+            navigation[view] = navigation_to_response(result) if result else None
+
     return JobDetailResponse(
         job=job_to_response(job),
         transcript=transcript_response,
         analysis=analysis_response,
+        navigation=navigation,
     )
+
+
+@router.api_route("/jobs/{job_id}/video", methods=["GET", "HEAD"])
+async def get_job_video(job_id: str):
+    """Serve retained video, including byte ranges for native-player seeking."""
+    job = get_state_manager().get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    path = video_file_path(job)
+    if path is None:
+        raise HTTPException(404, "Retained video is unavailable")
+    return FileResponse(path, filename=path.name, content_disposition_type="inline")
 
 
 @router.post("/jobs/{job_id}/retry", response_model=JobResponse)
@@ -215,7 +272,9 @@ async def retry_job(
     state.update_job(job)
 
     # Start processing in background
-    background_tasks.add_task(process_job, job.id, job.url)
+    background_tasks.add_task(
+        process_job, job.id, job.url, job.keep_video, job.keep_audio
+    )
 
     return job_to_response(job)
 
@@ -235,6 +294,8 @@ async def delete_job(job_id: str):
         storage.delete_transcript(job_id)
     if hasattr(storage, 'delete_analysis'):
         storage.delete_analysis(job_id)
+    if hasattr(storage, 'delete_navigation'):
+        storage.delete_navigation(job_id)
 
     # Delete the specific job
     state.delete_job(job_id)
@@ -341,3 +402,162 @@ def run_analysis(job_id: str):
     # Run analysis
     analysis = analyze_transcript(transcript.transcript_text, job_id)
     storage.save_analysis(analysis)
+
+
+def navigation_to_response(analysis: NavigationAnalysis) -> NavigationResponse:
+    return NavigationResponse(**analysis.to_dict())
+
+
+def completed_transcript(job_id: str):
+    """Require an existing, completed job with a stored transcript."""
+    state = get_state_manager()
+    job = state.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.stage != Stage.COMPLETED:
+        raise HTTPException(400, "Only completed transcripts support navigation and search")
+    storage = state._storage
+    if not hasattr(storage, "get_transcript"):
+        raise HTTPException(400, "This storage backend does not support transcripts")
+    transcript = storage.get_transcript(job_id)
+    if not transcript:
+        raise HTTPException(404, "Transcript not found")
+    return state, storage, transcript
+
+
+@router.get("/jobs/{job_id}/navigation/{view}", response_model=Optional[NavigationResponse])
+async def get_navigation(job_id: str, view: Literal["timeline", "topics"]):
+    """Read a saved view without starting analysis."""
+    state = get_state_manager()
+    if not state.get_job(job_id):
+        raise HTTPException(404, "Job not found")
+    storage = state._storage
+    if not hasattr(storage, "get_navigation"):
+        raise HTTPException(400, "This storage backend does not support navigation")
+    analysis = storage.get_navigation(job_id, view)
+    return navigation_to_response(analysis) if analysis else None
+
+
+@router.post("/jobs/{job_id}/navigation/{view}", response_model=NavigationResponse)
+async def create_navigation(
+    job_id: str, view: Literal["timeline", "topics"], response: Response
+):
+    """Await creation of exactly the selected view while keeping the API responsive."""
+    state, storage, transcript = completed_transcript(job_id)
+    if not all(hasattr(storage, name) for name in ("get_navigation", "save_navigation", "claim_navigation")):
+        raise HTTPException(400, "This storage backend does not support navigation")
+
+    if not storage.claim_navigation(job_id, view):
+        existing = storage.get_navigation(job_id, view)
+        if not existing:
+            raise HTTPException(409, "Navigation changed while it was being requested; retry")
+        if existing.status in (AnalysisStatus.PENDING, AnalysisStatus.PROCESSING):
+            response.status_code = 202
+        return navigation_to_response(existing)
+
+    reservation = storage.get_navigation(job_id, view)
+    finished = asyncio.Event()
+    heartbeat = asyncio.create_task(keep_navigation_alive(storage, job_id, view, finished))
+    try:
+        try:
+            analysis = await run_in_threadpool(analyze_navigation, transcript, job_id, view)
+        except Exception:
+            # Unexpected failures must release the reservation so retry remains possible.
+            logger.exception("Navigation creation failed for %s/%s", job_id, view)
+            analysis = NavigationAnalysis(
+                job_id=job_id, view=view, status=AnalysisStatus.FAILED,
+                error="Navigation creation failed. Please retry.",
+            )
+    finally:
+        finished.set()
+        await heartbeat
+    if not state.get_job(job_id):
+        storage.delete_navigation(job_id)
+        raise HTTPException(404, "Job was deleted while navigation was being created")
+    current_transcript = storage.get_transcript(job_id)
+    if (
+        not current_transcript
+        or current_transcript.transcript_text != transcript.transcript_text
+        or current_transcript.words != transcript.words
+        or current_transcript.utterances != transcript.utterances
+    ):
+        storage.delete_navigation(job_id)
+        raise HTTPException(409, "Transcript changed while navigation was being created. Create this view again.")
+    if reservation:
+        analysis.created_at = reservation.created_at
+    storage.save_navigation(analysis)
+    return navigation_to_response(analysis)
+
+
+async def keep_navigation_alive(storage, job_id: str, view: str, finished: asyncio.Event):
+    """Keep a long multi-call analysis reserved without blocking other requests."""
+    if not hasattr(storage, "lease_navigation"):
+        return
+    while not finished.is_set():
+        try:
+            await asyncio.wait_for(finished.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            try:
+                if not storage.lease_navigation(job_id, view):
+                    return
+            except Exception:
+                logger.exception("Could not refresh navigation reservation for %s/%s", job_id, view)
+                return
+
+
+async def update_subtopic_summaries(storage, transcript, analysis):
+    """Rewrite summaries while preserving a saved view and its source passages."""
+    try:
+        updated = await run_in_threadpool(summarize_subtopics, transcript, analysis)
+    except (ValueError, LLMError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    if not storage.save_navigation_if_current(updated, analysis, transcript):
+        raise HTTPException(409, "Navigation or transcript changed while updating summaries; try again")
+    return navigation_to_response(updated)
+
+
+@router.post("/jobs/{job_id}/navigation/{view}/summaries", response_model=NavigationResponse)
+async def refresh_subtopic_summaries(job_id: str, view: Literal["timeline", "topics"]):
+    """Update existing subtopic summaries without recreating topic navigation."""
+    _, storage, transcript = completed_transcript(job_id)
+    if not all(hasattr(storage, method) for method in ("get_navigation", "save_navigation_if_current")):
+        raise HTTPException(400, "This storage backend does not support navigation")
+    analysis = storage.get_navigation(job_id, view)
+    if not analysis or analysis.status != AnalysisStatus.COMPLETED:
+        raise HTTPException(400, "Create this view before updating its subtopic summaries")
+    if not needs_subtopic_summaries(analysis):
+        return navigation_to_response(analysis)
+
+    # Concurrent requests share the same work instead of making duplicate calls.
+    key = (job_id, view)
+    task = _summary_updates.get(key)
+    if task is None:
+        task = asyncio.create_task(update_subtopic_summaries(storage, transcript, analysis))
+        _summary_updates[key] = task
+
+        def release(completed):
+            if _summary_updates.get(key) is completed:
+                _summary_updates.pop(key, None)
+            # Retrieve failures even when the client disconnected during the call.
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(release)
+    return await asyncio.shield(task)
+
+
+@router.post("/jobs/{job_id}/search", response_model=PassageSearchResponse)
+async def search_passages(job_id: str, body: PassageSearchRequest):
+    """Find exact phrases locally, or retrieve related passages using the LLM."""
+    _, _, transcript = completed_transcript(job_id)
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(400, "Enter a phrase or idea to search for")
+    try:
+        results = await run_in_threadpool(search_transcript, transcript, query, body.mode)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except LLMError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return PassageSearchResponse(query=query, mode=body.mode, results=results)

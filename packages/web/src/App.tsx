@@ -20,7 +20,7 @@ function App() {
               Transcripts
             </h1>
             <p className="mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
-              YouTube video transcription
+              YouTube and X video transcription
             </p>
           </header>
 
