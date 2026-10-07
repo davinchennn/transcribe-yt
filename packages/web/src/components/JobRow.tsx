@@ -3,16 +3,17 @@ import { useRetryJob, useDeleteJob } from '../hooks/useJobs';
 
 interface JobRowProps {
   job: Job;
+  index: number;
   onSelect: (id: string) => void;
 }
 
 const stageLabels: Record<string, string> = {
-  pending: 'Pending',
+  pending: 'Queued',
   downloading: 'Downloading',
-  extracting: 'Extracting',
+  extracting: 'Extracting audio',
   transcribing: 'Transcribing',
   saving: 'Saving',
-  completed: 'Completed',
+  completed: 'Ready to read',
   failed: 'Failed',
 };
 
@@ -23,8 +24,13 @@ function statusColor(stage: string): string {
   return 'var(--status-pending)';
 }
 
+function jobDate(dateStr: string): Date {
+  // Stored job timestamps are UTC, including older values without a suffix.
+  return new Date(/(?:Z|[+-]\d{2}:\d{2})$/i.test(dateStr) ? dateStr : `${dateStr}Z`);
+}
+
 function timeAgo(dateStr: string): string {
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  const seconds = Math.max(0, Math.floor((Date.now() - jobDate(dateStr).getTime()) / 1000));
   if (seconds < 60) return 'just now';
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
@@ -34,101 +40,80 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
-export function JobRow({ job, onSelect }: JobRowProps) {
+function sourceLabel(url: string): string {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    if (hostname === 'youtu.be' || hostname === 'youtube.com' || hostname.endsWith('.youtube.com')) return 'YouTube';
+    if (hostname === 'x.com' || hostname.endsWith('.x.com') || hostname === 'twitter.com' || hostname.endsWith('.twitter.com')) return 'X';
+    return hostname;
+  } catch {
+    return 'Video';
+  }
+}
+
+export function JobRow({ job, index, onSelect }: JobRowProps) {
   const retryJob = useRetryJob();
   const deleteJob = useDeleteJob();
-
   const isProcessing = ['downloading', 'extracting', 'transcribing', 'saving'].includes(job.stage);
   const isClickable = job.stage === 'completed';
-
-  const handleCardClick = () => {
-    if (isClickable) onSelect(job.id);
-  };
+  const title = job.title || job.id;
 
   return (
-    <div
-      onClick={handleCardClick}
-      className="group rounded-xl p-5 border transition-all duration-200"
-      style={{
-        backgroundColor: 'var(--bg-surface)',
-        borderColor: 'var(--border)',
-        cursor: isClickable ? 'pointer' : 'default',
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.borderColor = 'var(--border-bright)';
-        e.currentTarget.style.backgroundColor = 'var(--bg-elevated)';
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = 'var(--border)';
-        e.currentTarget.style.backgroundColor = 'var(--bg-surface)';
-      }}
-    >
-      {/* Title */}
-      <div className="font-medium text-sm truncate mb-1" style={{ color: 'var(--text-primary)' }}>
-        {job.title || job.id}
-      </div>
-
-      {/* URL preview */}
-      <div className="text-xs truncate mb-4 font-mono" style={{ color: 'var(--text-muted)' }}>
-        {job.url}
-      </div>
-
-      {/* Status + timestamp row */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+    <article className={`job-row${isClickable ? ' is-ready' : ''}`}>
+      <span className="job-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+      <div className="job-content">
+        <div className="job-topline">
+          <span className="job-source">{sourceLabel(job.url)}</span>
           <span
-            className={`inline-block w-2 h-2 rounded-full ${isProcessing ? 'animate-pulse-dot' : ''}`}
-            style={{ backgroundColor: statusColor(job.stage) }}
-          />
-          <span className="text-xs font-medium" style={{ color: statusColor(job.stage) }}>
+            className={`job-status${isProcessing ? ' is-processing' : ''}`}
+            style={{ color: statusColor(job.stage) }}
+          >
+            <span className="job-status-dot" aria-hidden="true" />
             {stageLabels[job.stage] || job.stage}
           </span>
         </div>
-        <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>
-          {timeAgo(job.updated_at)}
-        </span>
-      </div>
-
-      {/* Error message */}
-      {job.error && (
-        <div className="text-xs mt-2 truncate" style={{ color: 'var(--status-failed)' }} title={job.error}>
-          {job.error}
-        </div>
-      )}
-
-      {/* Action buttons */}
-      <div className="flex gap-2 mt-3 pt-3" style={{ borderTop: '1px solid var(--border)' }}>
-        {job.stage === 'failed' && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              retryJob.mutate(job.id);
-            }}
-            disabled={retryJob.isPending}
-            className="text-xs font-medium transition-colors disabled:opacity-50 cursor-pointer"
-            style={{ color: 'var(--accent)' }}
-            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--accent-hover)'}
-            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--accent)'}
-          >
-            Retry
-          </button>
+        <h3 className="job-title">
+          {isClickable ? (
+            <button className="job-title-button" type="button" onClick={() => onSelect(job.id)}>
+              <span>{title}</span>
+              <span className="job-title-arrow" aria-hidden="true">↗</span>
+            </button>
+          ) : title}
+        </h3>
+        <p className="job-url">{job.url}</p>
+        {job.error && <p className="job-error">{job.error}</p>}
+        {(retryJob.isError || deleteJob.isError) && (
+          <p className="job-error" role="alert">{retryJob.error?.message || deleteJob.error?.message}</p>
         )}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            if (confirm('Delete this job?')) {
-              deleteJob.mutate(job.id);
-            }
-          }}
-          disabled={deleteJob.isPending}
-          className="text-xs font-medium transition-colors disabled:opacity-50 cursor-pointer ml-auto"
-          style={{ color: 'var(--text-muted)' }}
-          onMouseEnter={(e) => e.currentTarget.style.color = 'var(--status-failed)'}
-          onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
-        >
-          Delete
-        </button>
       </div>
-    </div>
+      <div className="job-actions">
+        <time className="job-date" dateTime={jobDate(job.updated_at).toISOString()} title={jobDate(job.updated_at).toLocaleString()}>
+          {timeAgo(job.updated_at)}
+        </time>
+        <div className="job-action-buttons">
+          {job.stage === 'failed' && (
+            <button
+              type="button"
+              onClick={() => retryJob.mutate(job.id)}
+              disabled={retryJob.isPending}
+              className="text-action"
+            >
+              {retryJob.isPending ? 'Retrying…' : 'Retry'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (confirm('Delete this job?')) deleteJob.mutate(job.id);
+            }}
+            disabled={deleteJob.isPending}
+            className="text-action danger-action"
+            aria-label={`Delete ${title}`}
+          >
+            {deleteJob.isPending ? 'Deleting…' : 'Delete'}
+          </button>
+        </div>
+      </div>
+    </article>
   );
 }

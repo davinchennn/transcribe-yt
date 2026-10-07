@@ -31,8 +31,8 @@ function PassageDetail({ transcript, passage, currentTime, onSeek }: {
   if (!passage) return (
     <aside className="passage-panel nav-panel">
       <span className="section-eyebrow">Selected passage</span>
-      <h2>Start with a topic or a search</h2>
-      <p>Select a passage from the timeline, topic tracks, or search results to read its words and navigate the video.</p>
+      <h2>Select a passage</h2>
+      <p>Choose a timed passage in the visualization or search results to read its words here.</p>
     </aside>
   );
   const utterances = passageUtterances(transcript, passage);
@@ -131,7 +131,7 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
   return (
     <>
       <div className="transcript-toolbar">
-        <span>{formatTime(duration)} · {transcript.utterances.length} turns</span>
+        <div className="transcript-statline"><span><strong>{formatTime(duration)}</strong> running time</span><span><strong>{transcript.utterances.length.toLocaleString()}</strong> speaker turns</span></div>
         <div className="transcript-actions">
           <button className="nav-button compact" onClick={copyTranscript}>Copy transcript</button>
           <button className="nav-button compact" onClick={() => download('txt')}>Download TXT</button>
@@ -150,7 +150,7 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
       <section className="nav-panel search-panel" aria-label="Search this video">
         <form onSubmit={submitSearch} className="transcript-search">
           <div className="search-input-group">
-            <label htmlFor="transcript-search" className="section-eyebrow">Find something you remember</label>
+            <label htmlFor="transcript-search" className="section-eyebrow">Search the conversation</label>
             <input id="transcript-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchMode === 'exact' ? 'Words or a phrase from this video…' : 'Describe an idea, e.g. why growth slowed…'} />
           </div>
           <div className="search-controls">
@@ -177,7 +177,7 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
 
       <section className="nav-panel exploration-panel" aria-label="Explore this video">
         <div className="exploration-header">
-          <div><span className="section-eyebrow">Explore this video</span><h2>Choose your view</h2></div>
+          <div><span className="section-eyebrow">Navigation</span><h2>Explore the conversation</h2></div>
           <div className="view-switch" role="group" aria-label="Navigation view">
             {(['timeline', 'topics'] as const).map((item) => {
               const saved = item === view ? analysis : data.navigation?.[item];
@@ -212,7 +212,7 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
       </section>
 
       <details className="nav-panel summary-panel">
-        <summary>Video summary</summary>
+        <summary>The conversation at a glance</summary>
         {data.analysis?.status === 'completed' ? <>
           <p>{data.analysis.summary}</p>
           {data.analysis.key_points.length > 0 && <ul>{data.analysis.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul>}
@@ -230,11 +230,11 @@ export function TranscriptView({ jobId, onClose }: TranscriptViewProps) {
   const { data, isLoading, error } = useJob(jobId);
   return (
     <main className="transcript-page animate-fade-in">
-      <button className="transcript-back" onClick={onClose}>← Back to transcripts</button>
+      <button className="transcript-back" onClick={onClose}>← The archive</button>
       {isLoading && <div className="transcript-loading" role="status"><div className="skeleton h-8 w-2/3 mb-6" /><div className="skeleton h-72 w-full" /><span className="sr-only">Loading transcript</span></div>}
       {error && <p className="nav-error" role="alert">Error loading transcript: {error.message}</p>}
       {data && <>
-        <header className="transcript-header"><h1>{data.job.title || 'Untitled video'}</h1><a href={data.job.url} target="_blank" rel="noopener noreferrer">{data.job.url} ↗</a></header>
+        <header className="transcript-header"><span className="section-eyebrow">{isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} · Transcript &amp; visual guide</span><h1>{data.job.title || 'Untitled video'}</h1><a href={data.job.url} target="_blank" rel="noopener noreferrer">View original on {isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} ↗</a></header>
         {data.transcript ? <TranscriptWorkspace key={jobId} data={{ ...data, transcript: data.transcript }} /> : <p className="nav-empty">No transcript available.</p>}
       </>}
     </main>

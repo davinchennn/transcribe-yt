@@ -7,26 +7,30 @@ function App() {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: 'var(--bg-primary)', color: 'var(--text-primary)' }}>
+    <div className="app-shell">
+      <header className="app-masthead">
+        <button className="app-wordmark" onClick={() => setSelectedJobId(null)} aria-label="Transcripts home">Transcripts</button>
+        <span className="masthead-note">YouTube + X</span>
+      </header>
       {selectedJobId ? (
         <TranscriptView
           jobId={selectedJobId}
           onClose={() => setSelectedJobId(null)}
         />
       ) : (
-        <div className="max-w-6xl mx-auto px-6 py-10 animate-fade-in">
-          <header className="mb-10">
-            <h1 className="text-3xl font-bold tracking-tight" style={{ color: 'var(--text-primary)' }}>
-              Transcripts
-            </h1>
-            <p className="mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
-              YouTube and X video transcription
-            </p>
+        <main className="library-page animate-fade-in">
+          <header className="library-intro">
+            <div>
+              <h1>Conversations, in perspective.</h1>
+            </div>
+            <div className="library-intro-note">
+              <p>Read, search, and explore your videos.</p>
+            </div>
           </header>
 
           <SubmitForm />
           <JobList onSelectJob={setSelectedJobId} />
-        </div>
+        </main>
       )}
     </div>
   );

@@ -25,7 +25,7 @@ interface TopicBand {
   end: number;
 }
 
-const colors = ['#818cf8', '#34d399', '#fb923c', '#f472b6', '#38bdf8', '#a78bfa'];
+const colors = ['#47718a', '#b37555', '#7f8960', '#94809b', '#ba9855', '#568b87'];
 const colorStyle = (index: number) => ({ '--tile-color': colors[index % colors.length] }) as CSSProperties;
 const containsTime = (passage: { start: number; end: number }, time: number) => time >= passage.start && time < passage.end;
 
@@ -57,7 +57,9 @@ function timelineMinimumWidth(bands: TopicBand[]): number {
 
 function TimeAxis({ duration, start = 0, end = duration }: { duration: number; start?: number; end?: number }) {
   return <div className="time-axis" aria-hidden="true">
-    {Array.from({ length: 5 }, (_, index) => <span key={index}>{formatTime(start + (end - start) * index / 4)}</span>)}
+    {Array.from({ length: 5 }, (_, index) => <span className="time-axis-tick" key={index} style={{ left: `${index * 25}%` }}>
+      <span className="time-axis-label">{formatTime(start + (end - start) * index / 4)}</span>
+    </span>)}
   </div>;
 }
 
@@ -201,9 +203,11 @@ function TopicTracks({ analysis, duration, currentTime, selected, onSelect }: Pr
       <div className="topic-track-header"><span>Subject / subtopic</span><TimeAxis duration={duration} /></div>
       {entries.map(({ node, depth, color, titles }) => <div className={`topic-row ${depth === 0 ? 'is-root' : ''}`} key={node.id} style={colorStyle(color)} data-depth={depth}>
         <div className="topic-label" style={{ paddingLeft: `${depth * 18}px` }} title={`${titles.join(' / ')}${node.summary ? ` · ${node.summary}` : ''}`}>
-          <strong>{depth > 0 && <span className="topic-branch-mark" aria-hidden="true">↳ </span>}{node.title}</strong>
+          <strong>{depth === 0 ? <span className="topic-root-marker" aria-hidden="true">{String(color + 1).padStart(2, '0')}</span>
+            : <span className="topic-branch-mark" aria-hidden="true">↳ </span>}{node.title}</strong>
           {depth >= 1 && node.summary && <p className="subtopic-summary">{node.summary}</p>}
-          <span>{node.occurrences.length} passage{node.occurrences.length === 1 ? '' : 's'}</span>
+          <span className="topic-count">{node.children.length > 0 ? `${node.children.length} subtopic${node.children.length === 1 ? '' : 's'}${node.occurrences.length > 0 ? ' · ' : ''}` : ''}
+            {(node.children.length === 0 || node.occurrences.length > 0) && `${node.occurrences.length} passage${node.occurrences.length === 1 ? '' : 's'}`}</span>
         </div>
         <div className="topic-track">
           {node.occurrences.map((passage) => <button key={passage.id}
@@ -220,15 +224,59 @@ function TopicTracks({ analysis, duration, currentTime, selected, onSelect }: Pr
 }
 
 export function NavigationCanvas(props: Props) {
-  const { analysis, currentTime } = props;
+  const { analysis, currentTime, duration } = props;
+  const isTimeline = analysis.view === 'timeline';
+  const rootLabel = isTimeline ? 'chapter' : 'subject';
   return <div className="navigation-canvas">
     <div className="navigation-caption">
       <div>
-        <h3>{analysis.view === 'timeline' ? 'How the discussion unfolds' : 'Subjects across the video'}</h3>
-        <p>{analysis.summary ?? (analysis.view === 'timeline' ? 'Chapters and subtopics stay visible. Select a subtopic to reveal its next level.' : 'All subjects, subtopics, and their occurrences across the video.')}</p>
+        <p>{analysis.summary ?? (isTimeline ? 'Chapters and subtopics stay visible. Select a subtopic to reveal its next level.' : 'All subjects, subtopics, and their occurrences across the video.')}</p>
+        <div className="navigation-facts">
+          <span>{analysis.nodes.length} {rootLabel}{analysis.nodes.length === 1 ? '' : 's'}</span>
+          <span>{formatTime(duration)} video duration</span>
+        </div>
       </div>
-      <span className="playback-clock" title="Current video time">{formatTime(currentTime)}</span>
+      <div className="navigation-playback-key">
+        <span className="playback-key-line" aria-hidden="true" />
+        <span>Playback</span>
+        <span className="playback-clock" title="Current video time">{formatTime(currentTime)}</span>
+      </div>
     </div>
+    {!isTimeline && analysis.nodes.length > 1 && <div className="navigation-legend" aria-label="Subject color key">
+      {analysis.nodes.map((node, index) => <span className="navigation-legend-item" key={node.id} style={colorStyle(index)}>
+        <span className="navigation-legend-swatch" aria-hidden="true" />
+        <span>{node.title}</span>
+      </span>)}
+    </div>}
+    {isTimeline && analysis.nodes.length > 0 && <section className="chapter-overview" aria-label="Whole-video overview">
+      <div className="chapter-overview-heading">
+        <span className="band-label">Whole-video overview</span>
+        <p>Choose a chapter to inspect.</p>
+      </div>
+      <TimeAxis duration={duration} />
+      <div className="chapter-overview-track">
+        {analysis.nodes.map((node, index) => <button key={node.id} type="button"
+          className={`chapter-overview-segment ${containsTime(node, currentTime) ? 'is-current' : ''}`}
+          style={{ ...segmentPosition(node.start, node.end, 0, duration), ...colorStyle(index) }}
+          title={`${node.title} · ${formatTime(node.start)}–${formatTime(node.end)}`}
+          aria-label={`Locate ${node.title} in the detailed timeline, ${formatTime(node.start)} to ${formatTime(node.end)}`}
+          onClick={(event) => {
+            const canvas = event.currentTarget.closest('.navigation-canvas');
+            const scroll = canvas?.querySelector<HTMLElement>('.timeline-scroll');
+            const content = scroll?.querySelector<HTMLElement>('.timeline-content');
+            if (!scroll || !content) return;
+            const position = Math.max(0, Math.min(duration, node.start)) / Math.max(1, duration);
+            scroll.scrollTo({
+              left: position * content.clientWidth,
+              behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+            });
+          }}>
+          <span className="chapter-overview-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+          <span className="chapter-overview-title">{node.title}</span>
+        </button>)}
+        <Playhead time={currentTime} duration={duration} />
+      </div>
+    </section>}
     {analysis.view === 'timeline' ? <TimelineBands {...props} /> : <TopicTracks {...props} />}
     {analysis.nodes.length === 0 && <p className="nav-empty">No topics were found in this transcript.</p>}
     <p className="navigation-hint">{analysis.view === 'timeline' ? 'Scroll horizontally to explore the timeline. Topic selection reveals children and the full summary without moving playback. Passage tiles seek the video.' : 'All hierarchy levels stay visible. Passage markers seek the video.'} The vertical line follows playback.</p>
