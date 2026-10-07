@@ -1,5 +1,6 @@
 import type { Job } from '../api/client';
 import { useRetryJob, useDeleteJob } from '../hooks/useJobs';
+import { VideoReference } from './VideoReference';
 
 interface JobRowProps {
   job: Job;
@@ -81,6 +82,7 @@ export function JobRow({ job, index, onSelect }: JobRowProps) {
           ) : title}
         </h3>
         <p className="job-url">{job.url}</p>
+        <VideoReference id={job.id} />
         {job.error && <p className="job-error">{job.error}</p>}
         {(retryJob.isError || deleteJob.isError) && (
           <p className="job-error" role="alert">{retryJob.error?.message || deleteJob.error?.message}</p>

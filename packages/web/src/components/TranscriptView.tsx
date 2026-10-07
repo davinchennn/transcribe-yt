@@ -9,6 +9,7 @@ import { isXVideoUrl } from '../lib/video';
 import { NavigationCanvas } from './NavigationCanvas';
 import { NativeVideoPlayer } from './NativeVideoPlayer';
 import { YouTubePlayer } from './YouTubePlayer';
+import { VideoReference } from './VideoReference';
 import type { VideoHandle } from './YouTubePlayer';
 
 interface TranscriptViewProps { jobId: string; onClose: () => void }
@@ -234,7 +235,14 @@ export function TranscriptView({ jobId, onClose }: TranscriptViewProps) {
       {isLoading && <div className="transcript-loading" role="status"><div className="skeleton h-8 w-2/3 mb-6" /><div className="skeleton h-72 w-full" /><span className="sr-only">Loading transcript</span></div>}
       {error && <p className="nav-error" role="alert">Error loading transcript: {error.message}</p>}
       {data && <>
-        <header className="transcript-header"><span className="section-eyebrow">{isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} · Transcript &amp; visual guide</span><h1>{data.job.title || 'Untitled video'}</h1><a href={data.job.url} target="_blank" rel="noopener noreferrer">View original on {isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} ↗</a></header>
+        <header className="transcript-header">
+          <span className="section-eyebrow">{isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} · Transcript &amp; visual guide</span>
+          <h1>{data.job.title || 'Untitled video'}</h1>
+          <div className="transcript-reference">
+            <a href={data.job.url} target="_blank" rel="noopener noreferrer">View original on {isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} ↗</a>
+            <VideoReference id={data.job.id} />
+          </div>
+        </header>
         {data.transcript ? <TranscriptWorkspace key={jobId} data={{ ...data, transcript: data.transcript }} /> : <p className="nav-empty">No transcript available.</p>}
       </>}
     </main>
