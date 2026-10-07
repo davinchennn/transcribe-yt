@@ -1,11 +1,12 @@
 import type { Job } from '../api/client';
 import { useRetryJob, useDeleteJob } from '../hooks/useJobs';
 import { VideoReference } from './VideoReference';
+import { RouteLink } from './RouteLink';
+import { transcriptPath } from '../lib/routing';
 
 interface JobRowProps {
   job: Job;
   index: number;
-  onSelect: (id: string) => void;
 }
 
 const stageLabels: Record<string, string> = {
@@ -52,7 +53,7 @@ function sourceLabel(url: string): string {
   }
 }
 
-export function JobRow({ job, index, onSelect }: JobRowProps) {
+export function JobRow({ job, index }: JobRowProps) {
   const retryJob = useRetryJob();
   const deleteJob = useDeleteJob();
   const isProcessing = ['downloading', 'extracting', 'transcribing', 'saving'].includes(job.stage);
@@ -75,10 +76,10 @@ export function JobRow({ job, index, onSelect }: JobRowProps) {
         </div>
         <h3 className="job-title">
           {isClickable ? (
-            <button className="job-title-button" type="button" onClick={() => onSelect(job.id)}>
+            <RouteLink className="job-title-button" href={transcriptPath(job.id)}>
               <span>{title}</span>
               <span className="job-title-arrow" aria-hidden="true">↗</span>
-            </button>
+            </RouteLink>
           ) : title}
         </h3>
         <p className="job-url">{job.url}</p>

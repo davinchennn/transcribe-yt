@@ -1,10 +1,6 @@
 import { useJobs } from '../hooks/useJobs';
 import { JobRow } from './JobRow';
 
-interface JobListProps {
-  onSelectJob: (id: string) => void;
-}
-
 function SkeletonRow() {
   return (
     <div className="archive-skeleton-row" aria-hidden="true">
@@ -15,7 +11,7 @@ function SkeletonRow() {
   );
 }
 
-export function JobList({ onSelectJob }: JobListProps) {
+export function JobList() {
   const { data, isLoading, error } = useJobs();
 
   return (
@@ -51,7 +47,7 @@ export function JobList({ onSelectJob }: JobListProps) {
         <ol className="archive-list">
           {data.jobs.map((job, i) => (
             <li key={job.id} className="archive-item">
-              <JobRow job={job} index={i} onSelect={onSelectJob} />
+              <JobRow job={job} index={i} />
             </li>
           ))}
         </ol>

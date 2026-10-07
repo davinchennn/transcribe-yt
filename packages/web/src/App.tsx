@@ -1,23 +1,27 @@
-import { useState } from 'react';
 import { SubmitForm } from './components/SubmitForm';
 import { JobList } from './components/JobList';
 import { TranscriptView } from './components/TranscriptView';
+import { RouteLink } from './components/RouteLink';
+import { useRoute } from './hooks/useRoute';
+import { navigate, transcriptPath } from './lib/routing';
 
 function App() {
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const route = useRoute();
 
   return (
     <div className="app-shell">
       <header className="app-masthead">
-        <button className="app-wordmark" onClick={() => setSelectedJobId(null)} aria-label="Transcripts home">Transcripts</button>
+        <RouteLink className="app-wordmark" href="/" aria-label="Transcripts home">Transcripts</RouteLink>
         <span className="masthead-note">YouTube + X</span>
       </header>
-      {selectedJobId ? (
+      {route.page === 'transcript' ? (
         <TranscriptView
-          jobId={selectedJobId}
-          onClose={() => setSelectedJobId(null)}
+          key={route.jobId}
+          jobId={route.jobId}
+          view={route.view}
+          onViewChange={(view) => navigate(transcriptPath(route.jobId, view))}
         />
-      ) : (
+      ) : route.page === 'home' ? (
         <main className="library-page animate-fade-in">
           <header className="library-intro">
             <div>
@@ -29,7 +33,12 @@ function App() {
           </header>
 
           <SubmitForm />
-          <JobList onSelectJob={setSelectedJobId} />
+          <JobList />
+        </main>
+      ) : (
+        <main className="library-page animate-fade-in">
+          <header className="library-intro"><h1>Page not found.</h1></header>
+          <RouteLink className="nav-link" href="/">Return to the archive</RouteLink>
         </main>
       )}
     </div>

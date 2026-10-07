@@ -10,9 +10,14 @@ import { NavigationCanvas } from './NavigationCanvas';
 import { NativeVideoPlayer } from './NativeVideoPlayer';
 import { YouTubePlayer } from './YouTubePlayer';
 import { VideoReference } from './VideoReference';
+import { RouteLink } from './RouteLink';
 import type { VideoHandle } from './YouTubePlayer';
 
-interface TranscriptViewProps { jobId: string; onClose: () => void }
+interface TranscriptViewProps {
+  jobId: string;
+  view: NavigationView;
+  onViewChange: (view: NavigationView) => void;
+}
 
 function isProcessing(status?: string): boolean {
   return status === 'pending' || status === 'processing';
@@ -61,9 +66,12 @@ function PassageDetail({ transcript, passage, currentTime, onSeek }: {
   );
 }
 
-function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcript } }) {
+function TranscriptWorkspace({ data, view, onViewChange }: {
+  data: JobDetail & { transcript: Transcript };
+  view: NavigationView;
+  onViewChange: (view: NavigationView) => void;
+}) {
   const { job, transcript } = data;
-  const [view, setView] = useState<NavigationView>('timeline');
   const [timelineSelection, setTimelineSelection] = useState<{ analysisKey: string; ids: string[] }>({ analysisKey: '', ids: [] });
   const [selected, setSelected] = useState<Passage | null>(null);
   const [selectedTime, setSelectedTime] = useState(0);
@@ -184,7 +192,7 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
               const saved = item === view ? analysis : data.navigation?.[item];
               return <button key={item} className={item === view ? 'is-active' : ''} aria-pressed={item === view} onClick={() => {
                 if (item === view) void activeQuery.refetch();
-                else setView(item);
+                else onViewChange(item);
               }}>
                 {item === 'timeline' ? 'Timeline' : 'Topics'}<span>{item === view && checking ? 'Checking…' : saved?.status === 'completed' ? 'Ready' : isProcessing(saved?.status) ? 'Creating…' : 'Not created'}</span>
               </button>;
@@ -227,11 +235,11 @@ function TranscriptWorkspace({ data }: { data: JobDetail & { transcript: Transcr
   );
 }
 
-export function TranscriptView({ jobId, onClose }: TranscriptViewProps) {
+export function TranscriptView({ jobId, view, onViewChange }: TranscriptViewProps) {
   const { data, isLoading, error } = useJob(jobId);
   return (
     <main className="transcript-page animate-fade-in">
-      <button className="transcript-back" onClick={onClose}>← The archive</button>
+      <RouteLink className="transcript-back" href="/">← The archive</RouteLink>
       {isLoading && <div className="transcript-loading" role="status"><div className="skeleton h-8 w-2/3 mb-6" /><div className="skeleton h-72 w-full" /><span className="sr-only">Loading transcript</span></div>}
       {error && <p className="nav-error" role="alert">Error loading transcript: {error.message}</p>}
       {data && <>
@@ -243,7 +251,7 @@ export function TranscriptView({ jobId, onClose }: TranscriptViewProps) {
             <VideoReference id={data.job.id} />
           </div>
         </header>
-        {data.transcript ? <TranscriptWorkspace key={jobId} data={{ ...data, transcript: data.transcript }} /> : <p className="nav-empty">No transcript available.</p>}
+        {data.transcript ? <TranscriptWorkspace key={jobId} data={{ ...data, transcript: data.transcript }} view={view} onViewChange={onViewChange} /> : <p className="nav-empty">No transcript available.</p>}
       </>}
     </main>
   );

@@ -35,7 +35,7 @@ button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
 .font-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .app-shell { min-height: 100vh; }
 .app-masthead { max-width: 1440px; margin: 0 auto; padding: 18px 0 15px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; }
-.app-wordmark { background: none; border: 0; padding: 0; font-family: var(--font-serif); font-size: 24px; line-height: 1; font-weight: 500; letter-spacing: -.7px; color: var(--text-primary); }
+.app-wordmark { background: none; border: 0; padding: 0; font-family: var(--font-serif); font-size: 24px; line-height: 1; font-weight: 500; letter-spacing: -.7px; color: var(--text-primary); text-decoration: none; }
 .masthead-note { color: var(--text-muted); font-size: 11px; }
 .section-eyebrow { display: block; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .08em; font-size: 9px; font-weight: 500; line-height: 1.6; }
 .library-page { max-width: 1220px; margin: 0 auto; padding: 32px 0 24px; }
@@ -78,7 +78,7 @@ button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
 .job-status { display: flex; align-items: center; gap: 5px; font-size: 10px; }
 .job-status-dot { height: 4px; width: 4px; border-radius: 50%; background: currentColor; }
 .job-title { margin: 0; font-family: var(--font-serif); font-size: 21px; line-height: 1.3; font-weight: 400; letter-spacing: -.02em; text-wrap: pretty; overflow-wrap: anywhere; }
-.job-title-button { color: var(--text-primary); text-align: left; background: none; border: 0; padding: 0; font: inherit; line-height: inherit; max-width: 100%; overflow-wrap: anywhere; }
+.job-title-button { color: var(--text-primary); text-align: left; background: none; border: 0; padding: 0; font: inherit; line-height: inherit; max-width: 100%; overflow-wrap: anywhere; text-decoration: none; }
 .job-title-button:hover { color: var(--accent-hover); }
 .job-title-arrow { color: var(--accent); font-family: var(--font-sans); font-size: 14px; display: inline-block; margin-left: 7px; transition: transform .15s; }
 .job-title-button:hover .job-title-arrow { transform: translate(2px, -2px); }
@@ -112,7 +112,7 @@ button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
 
 /* The reading workspace */
 .transcript-page { width: 100%; max-width: 1440px; margin: 0 auto; padding: 22px 0 40px; }
-.transcript-back { color: var(--text-secondary); font-size: 11px; background: none; border: 0; padding: 0; margin-bottom: 18px; }
+.transcript-back { display: inline-block; color: var(--text-secondary); font-size: 11px; background: none; border: 0; padding: 0; margin-bottom: 18px; text-decoration: none; }
 .transcript-back:hover, .nav-link:hover { color: var(--accent-hover); }
 .transcript-header { margin-bottom: 18px; }
 .transcript-header h1 { font-family: var(--font-serif); font-size: clamp(28px, 2.5vw, 36px); font-weight: 500; line-height: 1.14; letter-spacing: -.035em; max-width: 1150px; margin: 8px 0 10px; text-wrap: pretty; }

@@ -45,6 +45,12 @@ Kimi Code access is subject to your membership's client and usage restrictions.
 
 ## Topic Navigation
 
+The web archive is at `/` and each transcript has a shareable `/jobs/{id}` URL.
+Topics uses `/jobs/{id}?view=topics`; refreshing or using browser Back/Forward
+preserves the transcript and selected view. Vite serves these routes during
+development and preview. A production web server must serve `index.html` for
+frontend routes such as `/jobs/{id}`.
+
 Open a completed transcript in the web UI and choose **Create Timeline** or
 **Create Topics**. Each action runs its own Kimi analysis and waits for the view
 to finish. Results are saved independently in SQLite, so switching to an existing
