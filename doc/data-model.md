@@ -1,10 +1,8 @@
 # Video data model
 
-## Locate records
+## Storage location
 
-`transcribe list --json` reports identity, availability, analysis states, media
-paths and resolved storage location. Filters: `--query`, `--source`, `--id`,
-`--stage`. Inventory contains metadata; it omits transcript text and topic trees.
+See the [CLI guide](cli.md) for discovering records and retrieving transcripts.
 
 SQLite defaults to `data/transcripts.db`; `STORAGE_PATH` overrides it. Relative
 paths use the process working directory. `data/`, `downloads/` and `transcripts/`

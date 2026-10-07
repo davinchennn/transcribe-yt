@@ -94,39 +94,10 @@ Three directories are auto-created in the project root on first run:
 
 All three are gitignored. To keep bulky media or the DB outside the repo, replace any of them with a symlink — the app follows symlinks transparently. Override the DB location specifically with `STORAGE_PATH=/custom/path.db`.
 
-## CLI Options
+## CLI
 
-```bash
-transcribe URL                          # Single video
-transcribe --playlist URL               # Playlist
-transcribe --file urls.txt              # Batch (one URL per line)
-transcribe --provider assemblyai URL    # Use AssemblyAI instead of Deepgram
-transcribe --no-video URL               # Audio only, skip video download
-transcribe list                         # List saved videos and available data
-transcribe list --query Lauren --source x --json
-transcribe list --id JOB_ID --json
-transcribe list --stage completed
-```
-
-`transcribe list` replaces `transcribe --status`. It lists full titles, stable
-job IDs, video platforms, processing stages, transcription providers, transcript
-availability, and separate summary, Timeline and Topics statuses. Use `--query`
-to match a title, URL or ID without case sensitivity; combine it with `--source`,
-`--id` or `--stage` to select the right video.
-
-`--json` also includes duration in seconds, word count, word-timing availability,
-analysis models, update times and errors, navigation node counts and hierarchy
-depth, and saved media paths with file-existence checks. `not_created` means
-there is no saved analysis; `failed` means an analysis was attempted and failed.
-The JSON storage backend reports analyses as `not_supported` and discovers
-transcripts through existing exports rather than a database table.
-
-Listing opens existing SQLite storage in read-only mode and never initializes
-schema or creates a missing data directory/database. It reads committed WAL
-updates while the app is running. The output reports the resolved storage path,
-including symlinks. Run from the repository root, or set `STORAGE_PATH` explicitly:
-default paths remain relative to the working directory. Listing makes no model
-requests and outputs metadata rather than complete transcripts or topic trees.
+See the [CLI guide](doc/cli.md) for transcription commands, saved-record discovery,
+and transcript retrieval.
 
 ## Python API
 

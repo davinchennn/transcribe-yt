@@ -6,13 +6,8 @@
 
 ## Find data
 
-Run from the repository root using the project environment:
-
-```bash
-.venv/bin/transcribe list --json
-.venv/bin/transcribe list --query TEXT --source x --json
-.venv/bin/transcribe list --id JOB_ID --json
-```
+Use the [CLI guide](doc/cli.md) to discover saved records and retrieve transcripts.
+Run commands from the repository root using the project environment.
 
 Confirm the platform and exact job ID before comparing records or diagnosing a
 view. Titles can match across independent uploads. Use the inventory's resolved
@@ -22,7 +17,8 @@ working directory.
 Read [doc/data-model.md](doc/data-model.md) for columns, JSON structures and units.
 Use inventory or API reads for discovery. Direct SQLite inspection requires
 `mode=ro`; constructing `SQLiteStorage` initializes schema.
-Update the data guide when storage contracts or discovery commands change.
+Update the CLI guide when commands or their output change; update the data guide
+when storage contracts change.
 
 ## Validate changed code
 

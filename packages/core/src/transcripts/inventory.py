@@ -8,6 +8,16 @@ from typing import Any, Dict, List, Optional
 
 from transcripts.config import get_storage_backend, get_storage_path
 from transcripts.sources import parse_video_source
+from transcripts.models import Word, derive_utterances
+
+
+def _transcript_content(data: Dict[str, Any]) -> Dict[str, Any]:
+    words = [Word(**word) for word in data.get("words") or []]
+    utterances = derive_utterances(words)
+    return {
+        **data,
+        "utterances": [vars(utterance) for utterance in utterances] if words else data.get("utterances") or [],
+    }
 
 
 def _json_array(value: Optional[str]) -> List[Any]:
@@ -106,7 +116,7 @@ def _matches(job: Dict[str, Any], query: Optional[str], source: Optional[str],
 
 
 def _sqlite_jobs(path: Path, query: Optional[str], source: Optional[str],
-                 job_id: Optional[str], stage: Optional[str]) -> List[Dict[str, Any]]:
+                 job_id: Optional[str], stage: Optional[str], include_content: bool = False) -> List[Dict[str, Any]]:
     connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -125,11 +135,18 @@ def _sqlite_jobs(path: Path, query: Optional[str], source: Optional[str],
             transcript = None
             if "transcripts" in tables:
                 row = connection.execute(
-                    "SELECT duration, words FROM transcripts WHERE job_id = ?", (job["id"],)
+                    ("SELECT * FROM transcripts WHERE job_id = ?" if include_content else
+                     "SELECT duration, words FROM transcripts WHERE job_id = ?"), (job["id"],)
                 ).fetchone()
                 if row is not None:
                     transcript = {"duration": row["duration"], "words": _json_array(row["words"])}
+                    if include_content:
+                        transcript = {**dict(row), **transcript}
+                        transcript["metadata"] = json.loads(transcript.get("metadata") or "{}")
+                        transcript["utterances"] = _json_array(transcript.get("utterances"))
             item["transcript"] = _transcript_info(transcript)
+            if include_content:
+                item["transcript"] = {**item["transcript"], **_transcript_content(transcript)} if transcript is not None else item["transcript"]
             analysis = None
             if "analyses" in tables:
                 row = connection.execute("SELECT * FROM analyses WHERE job_id = ?", (job["id"],)).fetchone()
@@ -151,7 +168,7 @@ def _sqlite_jobs(path: Path, query: Optional[str], source: Optional[str],
 
 
 def _json_jobs(path: Path, query: Optional[str], source: Optional[str],
-               job_id: Optional[str], stage: Optional[str]) -> List[Dict[str, Any]]:
+               job_id: Optional[str], stage: Optional[str], include_content: bool = False) -> List[Dict[str, Any]]:
     state = json.loads(path.read_text(encoding="utf-8"))
     jobs = sorted(state["jobs"].values(), key=lambda job: (job.get("updated_at") or "", job["id"]), reverse=True)
     result = []
@@ -164,7 +181,11 @@ def _json_jobs(path: Path, query: Optional[str], source: Optional[str],
         if export["exists"]:
             export_path = Path(export["resolved_path"])
             transcript = json.loads(export_path.read_text(encoding="utf-8")) if export_path.suffix.lower() == ".json" else {}
+            if include_content and export_path.suffix.lower() != ".json":
+                transcript = {"transcript_text": export_path.read_text(encoding="utf-8")}
         item["transcript"] = _transcript_info(transcript, "file")
+        if include_content and transcript is not None:
+            item["transcript"] = {**item["transcript"], **_transcript_content(transcript)}
         item["analysis"] = {**_analysis_info(None, supported=False), "key_point_count": 0}
         item["navigation"] = {view: _navigation_info(None, supported=False) for view in ("timeline", "topics")}
         result.append(item)
@@ -192,3 +213,19 @@ def list_inventory(query: Optional[str] = None, source: Optional[str] = None,
         "jobs": jobs,
         "total": len(jobs),
     }
+
+
+def show_transcript(job_id: str, backend: Optional[str] = None,
+                    storage_path: Optional[str] = None) -> Dict[str, Any]:
+    """Retrieve one exact job and its transcript without initializing storage."""
+    backend = get_storage_backend(backend)
+    path = Path(storage_path or get_storage_path(backend, create_directory=False)).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Storage file not found: {path}")
+    reader = _sqlite_jobs if backend == "sqlite" else _json_jobs
+    jobs = reader(path, None, None, job_id, None, include_content=True)
+    if not jobs:
+        raise ValueError(f"Job not found: {job_id}")
+    if not jobs[0]["transcript"]["available"]:
+        raise ValueError(f"No saved transcript for job: {job_id}")
+    return {"storage": {"backend": backend, "path": str(path)}, "job": jobs[0]}

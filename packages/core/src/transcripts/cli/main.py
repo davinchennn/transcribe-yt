@@ -42,6 +42,9 @@ def main() -> None:
     if sys.argv[1:2] == ["list"]:
         _list_main(sys.argv[2:])
         return
+    if sys.argv[1:2] == ["show"]:
+        _show_main(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser(
         description="Download YouTube or X/Twitter videos, extract audio, and generate transcripts using Deepgram (or AssemblyAI)",
         epilog="List saved video data with: transcribe list --help",
@@ -303,6 +306,27 @@ def main() -> None:
     except Exception as e:
         print(f"Error: {str(e)}", file=sys.stderr)
         sys.exit(1)
+
+
+def _show_main(arguments: List[str]) -> None:
+    from transcripts.inventory import show_transcript
+
+    parser = argparse.ArgumentParser(prog="transcribe show", description="Read one saved transcript and its metadata without changing records.")
+    parser.add_argument("--id", dest="job_id", required=True, help="Exact job ID from transcribe list")
+    parser.add_argument("--json", dest="as_json", action="store_true", help="Include metadata, words and timestamped utterances as JSON")
+    args = parser.parse_args(arguments)
+    try:
+        result = show_transcript(args.job_id)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
+        parser.exit(1, f"Could not read saved transcript: {error}\n")
+    if args.as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        job = result["job"]
+        print(job["title"] or job["id"])
+        print(job["url"])
+        print()
+        print(job["transcript"].get("transcript_text", ""))
 
 
 def _list_main(arguments: List[str]) -> None:

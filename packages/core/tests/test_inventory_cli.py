@@ -107,6 +107,52 @@ class TestInventoryCLI(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(error, "")
 
+    def test_show_reads_transcript_and_derived_utterances_without_writes(self):
+        before = self.path.read_bytes()
+        code, output, error = self.cli(["show", "--id", self.x.id, "--json"])
+        self.assertEqual(code, 0, error)
+        result = json.loads(output)
+        self.assertEqual(result["storage"]["path"], str(self.path.resolve()))
+        self.assertEqual(result["job"]["source"], "x")
+        transcript = result["job"]["transcript"]
+        self.assertEqual(transcript["transcript_text"], "Source words")
+        self.assertEqual(transcript["metadata"], {})
+        self.assertEqual(transcript["utterances"][0]["text"], "Source words")
+        self.assertEqual(transcript["utterances"][0]["start"], 1000)
+        self.assertEqual(self.path.read_bytes(), before)
+        code, output, error = self.cli(["show", "--id", self.x.id])
+        self.assertEqual(code, 0, error)
+        self.assertIn("Source words", output)
+
+    def test_show_reports_missing_jobs_transcripts_and_required_id(self):
+        for job_id, message in (("missing", "Job not found"), (self.youtube.id, "No saved transcript")):
+            code, output, error = self.cli(["show", "--id", job_id, "--json"])
+            self.assertEqual(code, 1)
+            self.assertEqual(output, "")
+            self.assertIn(message, error)
+        code, output, error = self.cli(["show", "--json"])
+        self.assertEqual(code, 2)
+        code, output, error = self.cli(["show", "--help"], storage_path=self.root / "missing.db")
+        self.assertEqual(code, 0)
+        self.assertFalse((self.root / "missing.db").exists())
+
+    def test_show_json_backend_reads_json_and_text_exports(self):
+        for suffix in ("json", "txt"):
+            export = self.root / f"transcript.{suffix}"
+            content = {"transcript_text": "Hello", "words": [{"text": "Hello", "start": 0, "end": 1000}]}
+            export.write_text(json.dumps(content) if suffix == "json" else "Hello")
+            job = self.x.to_dict()
+            job["transcript_file"] = str(export)
+            state = self.root / "state.json"
+            state.write_text(json.dumps({"jobs": {job["id"]: job}}))
+            files_before = set(self.root.iterdir())
+            code, output, error = self.cli(["show", "--id", self.x.id, "--json"], storage_path=state, backend="json")
+            self.assertEqual(code, 0, error)
+            transcript = json.loads(output)["job"]["transcript"]
+            self.assertEqual(transcript["transcript_text"], "Hello")
+            self.assertEqual(transcript["storage"], "file")
+            self.assertEqual(set(self.root.iterdir()), files_before)
+
     def test_table_preserves_full_title_ids_and_platforms(self):
         code, output, error = self.cli(["list"])
         self.assertEqual(code, 0, error)
