@@ -68,6 +68,7 @@ class AnalysisResponse(BaseModel):
     summary: Optional[str] = None
     key_points: List[str] = []
     model: Optional[str] = None
+    provider: Optional[str] = None
     error: Optional[str] = None
     created_at: str
     updated_at: str
@@ -106,12 +107,18 @@ class NavigationResponse(BaseModel):
     summary: Optional[str] = None
     nodes: List[NavigationNodeResponse] = Field(default_factory=list)
     model: Optional[str] = None
+    provider: Optional[str] = None
     error: Optional[str] = None
     created_at: str
     updated_at: str
 
 
-class PassageSearchRequest(BaseModel):
+class InferenceRequest(BaseModel):
+    provider: Optional[Literal["kimi", "fireworks"]] = None
+    model: Optional[str] = Field(default=None, min_length=1, max_length=300)
+
+
+class PassageSearchRequest(InferenceRequest):
     query: str = Field(min_length=1, max_length=500)
     mode: Literal["exact", "semantic"] = "exact"
 

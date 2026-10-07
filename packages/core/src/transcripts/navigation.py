@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from transcripts.analyzer import KIMI_MODEL
+from transcripts.inference import resolve_inference
 from transcripts.llm import request_json
 from transcripts.models import AnalysisStatus, NavigationAnalysis, Transcript, derive_utterances
 
@@ -677,7 +677,9 @@ def analyze_navigation(
     transcript: Transcript, job_id: str, view: str, api_key: Optional[str] = None
 ) -> NavigationAnalysis:
     """Analyze exactly one view; failures are returned as failed cacheable results."""
-    analysis = NavigationAnalysis(job_id=job_id, view=view, status=AnalysisStatus.PROCESSING, model=KIMI_MODEL)
+    selection = resolve_inference()
+    analysis = NavigationAnalysis(job_id=job_id, view=view, status=AnalysisStatus.PROCESSING,
+                                  model=selection.model, provider=selection.provider)
     try:
         if view not in ("timeline", "topics"):
             raise NavigationError("Navigation view must be 'timeline' or 'topics'")

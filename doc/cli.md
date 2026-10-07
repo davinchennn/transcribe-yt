@@ -29,7 +29,7 @@ to match a title, URL or ID without case sensitivity; combine it with `--source`
 `--id` or `--stage` to select the right video.
 
 `--json` also includes duration in seconds, word count, word-timing availability,
-analysis models, update times and errors, navigation node counts and hierarchy
+analysis providers and models, update times and errors, navigation node counts and hierarchy
 depth, and saved media paths with file-existence checks. `not_created` means
 there is no saved analysis; `failed` means an analysis was attempted and failed.
 The JSON storage backend reports analyses as `not_supported` and discovers

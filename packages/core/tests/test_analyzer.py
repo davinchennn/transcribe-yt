@@ -15,7 +15,7 @@ class TestKimiCodeAnalysis(unittest.TestCase):
         response = {
             "choices": [{"message": {"content": '```json\n{"summary":"A summary","key_points":["Point"]}\n```'}}]
         }
-        with patch("transcripts.analyzer.urllib.request.urlopen") as request:
+        with patch("transcripts.llm.urllib.request.urlopen") as request:
             request.return_value.__enter__.return_value.read.return_value = json.dumps(response).encode()
             result = analyze_transcript("Transcript text", "job-1", api_key="test-key")
 
@@ -37,14 +37,14 @@ class TestKimiCodeAnalysis(unittest.TestCase):
             "https://api.kimi.com/coding/v1/chat/completions", 403,
             "Forbidden", {}, io.BytesIO(b'{"error":"Client not allowed"}'),
         )
-        with patch("transcripts.analyzer.urllib.request.urlopen", side_effect=error):
+        with patch("transcripts.llm.urllib.request.urlopen", side_effect=error):
             result = analyze_transcript("Text", "job-1", api_key="test-key")
         self.assertEqual(result.status, AnalysisStatus.FAILED)
         self.assertIn("403", result.error)
         self.assertIn("Client not allowed", result.error)
 
     def test_missing_key_does_not_send_request(self):
-        with patch("transcripts.config.load_config"), patch.dict("os.environ", {}, clear=True), patch("transcripts.analyzer.urllib.request.urlopen") as request:
+        with patch("transcripts.config.load_config"), patch.dict("os.environ", {}, clear=True), patch("transcripts.llm.urllib.request.urlopen") as request:
             result = analyze_transcript("Text", "job-1")
         request.assert_not_called()
         self.assertEqual(result.status, AnalysisStatus.FAILED)

@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../api/client';
-import type { CreateJobOptions, NavigationView } from '../api/client';
+import type { CreateJobOptions, NavigationView, InferenceSelection } from '../api/client';
 
 export function useJobs() {
   return useQuery({
@@ -33,10 +33,10 @@ export function useNavigation(id: string, view: NavigationView) {
   });
 }
 
-export function useCreateNavigation(id: string) {
+export function useCreateNavigation(id: string, selection?: InferenceSelection) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (view: NavigationView) => api.createNavigation(id, view),
+    mutationFn: (view: NavigationView) => api.createNavigation(id, view, selection),
     onSuccess: async (data, view) => {
       await queryClient.cancelQueries({ queryKey: ['navigation', id, view], exact: true });
       queryClient.setQueryData(['navigation', id, view], data);
@@ -45,10 +45,10 @@ export function useCreateNavigation(id: string) {
   });
 }
 
-export function useUpdateNavigationSummaries(id: string) {
+export function useUpdateNavigationSummaries(id: string, selection?: InferenceSelection) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (view: NavigationView) => api.updateNavigationSummaries(id, view),
+    mutationFn: (view: NavigationView) => api.updateNavigationSummaries(id, view, selection),
     onSuccess: async (data, view) => {
       await queryClient.cancelQueries({ queryKey: ['navigation', id, view], exact: true });
       queryClient.setQueryData(['navigation', id, view], data);
@@ -90,11 +90,11 @@ export function useDeleteJob() {
   });
 }
 
-export function useAnalyzeJob() {
+export function useAnalyzeJob(selection?: InferenceSelection) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (id: string) => api.analyzeJob(id),
+    mutationFn: (id: string) => api.analyzeJob(id, selection),
     onSuccess: (_data, id) => {
       queryClient.invalidateQueries({ queryKey: ['job', id] });
     },

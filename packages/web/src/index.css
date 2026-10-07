@@ -353,3 +353,9 @@ button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+.inference-settings { margin: 1rem 0; }
+.inference-controls { display: flex; flex-wrap: wrap; gap: 1rem; margin: .75rem 0; }
+.inference-controls label { display: flex; flex-direction: column; gap: .4rem; }
+.inference-controls label:last-child { flex: 1; min-width: min(100%, 18rem); }
+.inference-controls input, .inference-controls select { width: 100%; padding: .65rem; border: 1px solid var(--color-border, #ddd); border-radius: .4rem; background: transparent; color: inherit; }

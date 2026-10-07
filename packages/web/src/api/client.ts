@@ -45,6 +45,7 @@ export interface Analysis {
   summary: string | null;
   key_points: string[];
   model: string | null;
+  provider?: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -90,6 +91,7 @@ export interface NavigationAnalysis {
   summary: string | null;
   nodes: NavigationNode[];
   model: string | null;
+  provider?: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -111,6 +113,29 @@ export interface CreateJobOptions {
   url: string;
   keep_video?: boolean;
   keep_audio?: boolean;
+}
+
+export interface InferenceSelection {
+  provider: string;
+  model: string;
+}
+
+export interface InferenceProvider {
+  id: string;
+  label: string;
+  configured: boolean;
+  default_model: string;
+  models: string[];
+}
+
+export interface InferenceOptions {
+  default_provider: string;
+  default_model: string;
+  providers: InferenceProvider[];
+}
+
+export async function getInferenceProviders(): Promise<InferenceOptions> {
+  return fetchJson(`${API_BASE}/inference/providers`);
 }
 
 const API_BASE = '/api';
@@ -176,9 +201,10 @@ export async function clearJobs(stage?: string): Promise<{ cleared: number }> {
   });
 }
 
-export async function analyzeJob(id: string): Promise<Analysis> {
+export async function analyzeJob(id: string, selection?: InferenceSelection): Promise<Analysis> {
   return fetchJson(`${API_BASE}/jobs/${id}/analyze`, {
     method: 'POST',
+    body: JSON.stringify(selection),
   });
 }
 
@@ -186,17 +212,17 @@ export async function getNavigation(id: string, view: NavigationView): Promise<N
   return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}`);
 }
 
-export async function createNavigation(id: string, view: NavigationView): Promise<NavigationAnalysis> {
-  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}`, { method: 'POST' });
+export async function createNavigation(id: string, view: NavigationView, selection?: InferenceSelection): Promise<NavigationAnalysis> {
+  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}`, { method: 'POST', body: JSON.stringify(selection) });
 }
 
-export async function updateNavigationSummaries(id: string, view: NavigationView): Promise<NavigationAnalysis> {
-  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}/summaries`, { method: 'POST' });
+export async function updateNavigationSummaries(id: string, view: NavigationView, selection?: InferenceSelection): Promise<NavigationAnalysis> {
+  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}/summaries`, { method: 'POST', body: JSON.stringify(selection) });
 }
 
-export async function searchTranscript(id: string, query: string, mode: SearchMode): Promise<SearchResponse> {
+export async function searchTranscript(id: string, query: string, mode: SearchMode, selection?: InferenceSelection): Promise<SearchResponse> {
   return fetchJson(`${API_BASE}/jobs/${id}/search`, {
     method: 'POST',
-    body: JSON.stringify({ query, mode }),
+    body: JSON.stringify({ query, mode, ...selection }),
   });
 }

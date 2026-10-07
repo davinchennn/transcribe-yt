@@ -27,8 +27,8 @@ analyses are unique per job; navigation is unique per `(job_id, view)`.
 |---|---|
 | `jobs` | `id`, `url`, `stage`, `title`, `error`, `provider`, `video_file`, `audio_file`, `transcript_file`, `keep_video`, `keep_audio`, `created_at`, `updated_at` |
 | `transcripts` | `id`, `job_id`, `video_url`, `title`, `duration`, `transcript_text`, `words`, `utterances`, `metadata`, `created_at` |
-| `analyses` | `id`, `job_id`, `status`, `summary`, `key_points`, `model`, `error`, `created_at`, `updated_at` |
-| `navigation_analyses` | `id`, `job_id`, `view`, `status`, `summary`, `nodes`, `model`, `error`, `created_at`, `updated_at` |
+| `analyses` | `id`, `job_id`, `status`, `summary`, `key_points`, `model`, `provider`, `error`, `created_at`, `updated_at` |
+| `navigation_analyses` | `id`, `job_id`, `view`, `status`, `summary`, `nodes`, `model`, `provider`, `error`, `created_at`, `updated_at` |
 
 `transcripts_fts(title, transcript_text)` is a derived search index; its `rowid`
 matches `transcripts.id`. FTS shadow tables and `sqlite_sequence` are bookkeeping.
@@ -73,3 +73,11 @@ API responses omit stored metadata and filesystem paths; inspect SQLite for thos
 bootstrap and conditional alterations; there are no versioned migrations.
 Inspect deployed columns with `PRAGMA table_info(TABLE)`. Foreign keys are
 declared but connection-level enforcement is not enabled.
+
+Analysis and navigation `provider` identifies the inference service (`kimi` or
+`fireworks`); `model` stores the exact model ID used at creation. Existing SQLite
+rows migrate to `provider = kimi`; older serialized records also default to Kimi.
+This is independent of `jobs.provider`, which identifies the transcription service.
+Subtopic summary updates preserve creation metadata and the existing hierarchy.
+Each job keeps one summary and one result per navigation view; regeneration replaces
+that result rather than storing per-model history.

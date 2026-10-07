@@ -117,6 +117,7 @@ class Analysis:
     error: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    provider: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert analysis to dictionary for JSON serialization."""
@@ -126,6 +127,7 @@ class Analysis:
             "summary": self.summary,
             "key_points": self.key_points,
             "model": self.model,
+            "provider": self.provider,
             "error": self.error,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -140,6 +142,7 @@ class Analysis:
             summary=data.get("summary"),
             key_points=data.get("key_points", []),
             model=data.get("model"),
+            provider=data.get("provider", "kimi"),
             error=data.get("error"),
             created_at=data.get("created_at", datetime.utcnow().isoformat()),
             updated_at=data.get("updated_at", datetime.utcnow().isoformat()),
@@ -159,6 +162,7 @@ class NavigationAnalysis:
     error: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    provider: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -168,6 +172,7 @@ class NavigationAnalysis:
             "summary": self.summary,
             "nodes": self.nodes,
             "model": self.model,
+            "provider": self.provider,
             "error": self.error,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -182,6 +187,7 @@ class NavigationAnalysis:
             summary=data.get("summary"),
             nodes=data.get("nodes", []),
             model=data.get("model"),
+            provider=data.get("provider", "kimi"),
             error=data.get("error"),
             created_at=data.get("created_at", datetime.utcnow().isoformat()),
             updated_at=data.get("updated_at", datetime.utcnow().isoformat()),

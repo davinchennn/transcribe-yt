@@ -38,10 +38,31 @@ automatically read browser cookies.
 
 ## Transcript Analysis
 
-The web UI can summarize completed transcripts using Kimi Code. Set
-`KIMI_CODE_API_KEY` in the root `.env` file. This is a separate key from Deepgram
-or AssemblyAI and uses `https://api.kimi.com/coding/v1` with `k3`.
-Kimi Code access is subject to your membership's client and usage restrictions.
+Choose an **Analysis settings** provider and model in a completed transcript.
+The selection is remembered in this browser and applies to summaries, timeline,
+topics, subtopic summary updates, and Meaning search. Saved results show their
+provider/model; **Regenerate** replaces a saved result using a different selection.
+Switching settings alone does not trigger inference.
+
+- **Kimi Code**: set `KIMI_CODE_API_KEY` in the root `.env` file. Default model: `k3`.
+  Access is subject to your membership's client and usage restrictions.
+- **Fireworks AI**: set `FIREWORKS_API_KEY`. Default model: `accounts/fireworks/models/kimi-k3`.
+  The model menu also offers Ember-1. Choose **Custom model…** for another model
+  or deployment ID available to your account.
+
+Keys stay on the server. Optional `ANALYSIS_PROVIDER` (`kimi` or `fireworks`),
+`KIMI_MODEL`, and `FIREWORKS_MODEL` environment variables set defaults.
+The Fireworks client uses the [chat completions API](https://docs.fireworks.ai/api-reference/post-chatcompletions);
+preset IDs come from [Kimi K3](https://fireworks.ai/models/fireworks/kimi-k3)
+and [Ember-1](https://fireworks.ai/models/fireworks/ember-1).
+
+`GET /api/inference/providers` returns providers, suggested model IDs, defaults,
+and whether each key is configured (never the key). Analysis and navigation POSTs
+accept an optional `{"provider": "fireworks", "model": "accounts/fireworks/models/kimi-k3"}`
+body; search accepts these fields alongside `query` and `mode`. Omitted bodies
+preserve existing cache behavior. Explicitly selecting a different provider/model
+regenerates a completed analysis; an in-progress request keeps its original selection.
+Subtopic summary updates preserve the original navigation provider/model metadata.
 
 ## Topic Navigation
 
@@ -52,7 +73,7 @@ development and preview. A production web server must serve `index.html` for
 frontend routes such as `/jobs/{id}`.
 
 Open a completed transcript in the web UI and choose **Create Timeline** or
-**Create Topics**. Each action runs its own Kimi analysis and waits for the view
+**Create Topics**. Each action runs its own analysis and waits for the view
 to finish. Results are saved independently in SQLite, so switching to an existing
 view does not make another model request. Failed analyses can be retried.
 
@@ -74,7 +95,7 @@ have extra vertical space, and selecting a subtopic reveals its full summary.
   Clicking a passage or a timed word seeks the player and preserves whether it
   was playing or paused. Only the selected passage appears in the reading pane.
 - **Words** search finds literal words and phrases locally. **Meaning** search
-  uses a separate Kimi request to find passages matching a description of an
+  uses a separate model request to find passages matching a description of an
   idea. Search runs within the open video when submitted.
 
 Navigation needs a transcript with source timestamps. Long transcripts are

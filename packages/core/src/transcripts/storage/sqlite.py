@@ -168,6 +168,11 @@ class SQLiteStorage(StorageBackend):
                 )
             """)
 
+            for table in ("analyses", "navigation_analyses"):
+                columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if "provider" not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN provider TEXT DEFAULT 'kimi'")
+
             conn.commit()
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
@@ -620,8 +625,8 @@ class SQLiteStorage(StorageBackend):
             conn.execute(
                 """
                 INSERT OR REPLACE INTO analyses
-                (job_id, status, summary, key_points, model, error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (job_id, status, summary, key_points, model, error, created_at, updated_at, provider)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     analysis.job_id,
@@ -632,6 +637,7 @@ class SQLiteStorage(StorageBackend):
                     analysis.error,
                     analysis.created_at,
                     analysis.updated_at,
+                    analysis.provider,
                 ),
             )
             conn.commit()
@@ -656,6 +662,7 @@ class SQLiteStorage(StorageBackend):
                 summary=row["summary"],
                 key_points=key_points,
                 model=row["model"],
+                provider=row["provider"],
                 error=row["error"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
@@ -681,16 +688,16 @@ class SQLiteStorage(StorageBackend):
             conn.execute(
                 """
                 INSERT INTO navigation_analyses
-                (job_id, view, status, summary, nodes, model, error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (job_id, view, status, summary, nodes, model, error, created_at, updated_at, provider)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id, view) DO UPDATE SET
                     status = excluded.status, summary = excluded.summary,
-                    nodes = excluded.nodes, model = excluded.model,
+                    nodes = excluded.nodes, model = excluded.model, provider = excluded.provider,
                     error = excluded.error, updated_at = excluded.updated_at
                 """,
                 (analysis.job_id, analysis.view, analysis.status.value,
                  analysis.summary, json.dumps(analysis.nodes), analysis.model,
-                 analysis.error, analysis.created_at, analysis.updated_at),
+                 analysis.error, analysis.created_at, analysis.updated_at, analysis.provider),
             )
             analysis.created_at = conn.execute(
                 "SELECT created_at FROM navigation_analyses WHERE job_id = ? AND view = ?",
@@ -769,7 +776,10 @@ class SQLiteStorage(StorageBackend):
         updated.updated_at = now
         return True
 
-    def claim_navigation(self, job_id: str, view: str) -> bool:
+    def claim_navigation(
+        self, job_id: str, view: str, provider: Optional[str] = None,
+        model: Optional[str] = None, *, replace_completed: bool = True,
+    ) -> bool:
         """Atomically reserve a view, allowing failed or abandoned requests to retry.
 
         A live request refreshes its lease with lease_navigation. Reservations
@@ -783,16 +793,20 @@ class SQLiteStorage(StorageBackend):
             cursor = conn.execute(
                 """
                 INSERT INTO navigation_analyses
-                (job_id, view, status, nodes, created_at, updated_at)
-                SELECT ?, ?, 'processing', '[]', ?, ?
+                (job_id, view, status, nodes, created_at, updated_at, provider, model)
+                SELECT ?, ?, 'processing', '[]', ?, ?, ?, ?
                 WHERE EXISTS (SELECT 1 FROM jobs WHERE id = ?)
                 ON CONFLICT(job_id, view) DO UPDATE SET
-                    status = 'processing', error = NULL, updated_at = excluded.updated_at
+                    status = 'processing', error = NULL, updated_at = excluded.updated_at,
+                    provider = excluded.provider, model = excluded.model
                 WHERE navigation_analyses.status = 'failed'
+                    OR (navigation_analyses.status = 'completed' AND ? AND ? IS NOT NULL
+                        AND (COALESCE(navigation_analyses.provider, 'kimi') != ?
+                             OR navigation_analyses.model IS NOT ?))
                     OR (navigation_analyses.status IN ('pending', 'processing')
                         AND navigation_analyses.updated_at < ?)
                 """,
-                (job_id, view, now, now, job_id, stale_before),
+                (job_id, view, now, now, provider, model, job_id, replace_completed, provider, provider, model, stale_before),
             )
             conn.commit()
             return cursor.rowcount > 0

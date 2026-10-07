@@ -59,6 +59,7 @@ def _analysis_info(data: Optional[Dict[str, Any]], supported: bool = True) -> Di
     return {
         "status": data.get("status") if data is not None else "not_created" if supported else "not_supported",
         "model": data.get("model") if data is not None else None,
+        "provider": data.get("provider", "kimi") if data is not None else None,
         "created_at": data.get("created_at") if data is not None else None,
         "updated_at": data.get("updated_at") if data is not None else None,
         "error": data.get("error") if data is not None else None,
