@@ -259,7 +259,11 @@ class DeepgramTranscriber(BaseTranscriber):
             model = kwargs.get("model", "nova-2")
             language = kwargs.get("language", "en")
             smart_format = kwargs.get("smart_format", True)
-            diarize = kwargs.get("diarize", True)
+            # SDK 5.3 exposes newer API parameters through request_options.
+            # Do not send legacy diarize together with diarize_model.
+            diarization_options = {}
+            if kwargs.get("diarize", True):
+                diarization_options["diarize_model"] = kwargs.get("diarize_model", "v2")
             utterances = kwargs.get("utterances", True)
 
             def file_chunks():
@@ -275,7 +279,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 model=model,
                 language=language,
                 smart_format=smart_format,
-                diarize=diarize,
+                request_options={"additional_query_parameters": diarization_options},
                 utterances=utterances,
             )
 
@@ -299,7 +303,11 @@ class DeepgramTranscriber(BaseTranscriber):
             model = kwargs.get("model", "nova-2")
             language = kwargs.get("language", "en")
             smart_format = kwargs.get("smart_format", True)
-            diarize = kwargs.get("diarize", True)
+            # SDK 5.3 exposes newer API parameters through request_options.
+            # Do not send legacy diarize together with diarize_model.
+            diarization_options = {}
+            if kwargs.get("diarize", True):
+                diarization_options["diarize_model"] = kwargs.get("diarize_model", "v2")
             utterances = kwargs.get("utterances", True)
 
             response = self.client.listen.v1.media.transcribe_url(
@@ -307,7 +315,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 model=model,
                 language=language,
                 smart_format=smart_format,
-                diarize=diarize,
+                request_options={"additional_query_parameters": diarization_options},
                 utterances=utterances,
             )
 
