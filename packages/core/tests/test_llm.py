@@ -1,4 +1,4 @@
-"""Shared Kimi JSON transport handles malformed output and actionable failures."""
+"""Shared JSON transport handles malformed output and actionable failures."""
 
 import io
 import json
@@ -40,7 +40,7 @@ class TestJSONClient(unittest.TestCase):
                 request_json("System", "User", "key")
 
     def test_missing_key_sends_no_request(self):
-        with patch("transcripts.llm.get_kimi_code_api_key", side_effect=ValueError("Set KIMI_CODE_API_KEY")), patch("transcripts.llm.urllib.request.urlopen") as request:
+        with patch("transcripts.llm.inference_api_key", side_effect=ValueError("Set KIMI_CODE_API_KEY")), patch("transcripts.llm.urllib.request.urlopen") as request:
             with self.assertRaisesRegex(LLMError, "KIMI_CODE_API_KEY"):
                 request_json("System", "User")
         request.assert_not_called()

@@ -1,12 +1,15 @@
 """Inference selection crosses API/thread boundaries and respects saved caches."""
 
+import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 from api import routes
 from api.main import app
@@ -16,6 +19,22 @@ from transcripts.state import StateManager
 from transcripts.storage.sqlite import SQLiteStorage
 
 JOB_ID = 'abcdefghijk'
+
+
+def catalog_options():
+    return {
+        'default_provider': 'kimi', 'default_model': 'k3',
+        'providers': [
+            {'id': provider, 'label': label, 'configured': True, 'default_model': model,
+             'models': [{'id': model, 'name': name, 'context_length': 262144}],
+             'catalog_status': 'ready', 'catalog_updated_at': '2026-10-07T00:00:00Z',
+             'catalog_error': None}
+            for provider, label, model, name in [
+                ('kimi', 'Kimi Code', 'k3', 'K3'),
+                ('fireworks', 'Fireworks AI', 'accounts/fireworks/models/live-model', 'Live model'),
+            ]
+        ],
+    }
 
 
 class InferenceRouteTests(unittest.TestCase):
@@ -39,11 +58,40 @@ class InferenceRouteTests(unittest.TestCase):
         self.addCleanup(self.client.close)
 
     def test_catalog_exposes_configuration_without_secrets(self):
-        response = self.client.get('/api/inference/providers')
+        with patch.object(routes, 'inference_options', return_value=catalog_options()) as catalog:
+            response = self.client.get('/api/inference/providers')
+        catalog.assert_called_once_with()
         self.assertEqual(response.status_code, 200)
         self.assertNotIn('fw-key', response.text)
         self.assertNotIn('kimi-key', response.text)
         self.assertEqual([p['id'] for p in response.json()['providers']], ['kimi', 'fireworks'])
+        self.assertEqual(response.json()['providers'][1]['models'][0]['name'], 'Live model')
+
+    def test_refresh_forces_discovery_without_starting_analysis(self):
+        with patch.object(routes, 'inference_options', return_value=catalog_options()) as catalog, \
+                patch.object(routes, 'analyze_navigation') as navigation, \
+                patch.object(routes, 'analyze_transcript') as summary:
+            response = self.client.post('/api/inference/providers/refresh')
+        self.assertEqual(response.status_code, 200)
+        catalog.assert_called_once_with(force_refresh=True)
+        navigation.assert_not_called()
+        summary.assert_not_called()
+
+    def test_stale_catalog_is_returned_with_models_and_error(self):
+        options = catalog_options()
+        options['providers'][1].update(catalog_status='stale', catalog_error='Fireworks AI catalog unavailable')
+        with patch.object(routes, 'inference_options', return_value=options):
+            response = self.client.post('/api/inference/providers/refresh')
+        self.assertEqual(response.status_code, 200)
+        provider = response.json()['providers'][1]
+        self.assertEqual(provider['catalog_status'], 'stale')
+        self.assertEqual(provider['models'][0]['name'], 'Live model')
+        self.assertIn('unavailable', provider['catalog_error'])
+
+    def test_invalid_default_configuration_is_a_client_error(self):
+        with patch.object(routes, 'inference_options', side_effect=ValueError('Invalid analysis provider')):
+            for method, path in [('get', '/api/inference/providers'), ('post', '/api/inference/providers/refresh')]:
+                self.assertEqual(getattr(self.client, method)(path).status_code, 400)
 
     def test_navigation_changes_model_only_on_explicit_request(self):
         def analyze(transcript, job_id, view):
@@ -105,3 +153,26 @@ class InferenceRouteTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertIn('FIREWORKS_API_KEY', response.text)
             analyze.assert_not_called()
+
+
+class NonblockingCatalogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discovery_does_not_block_health_requests(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def slow_catalog():
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('Test timed out')
+            return catalog_options()
+
+        with patch.object(routes, 'inference_options', side_effect=slow_catalog):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                discovery = asyncio.create_task(client.get('/api/inference/providers'))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                    health = await asyncio.wait_for(client.get('/api/health'), timeout=1)
+                    self.assertEqual(health.status_code, 200)
+                finally:
+                    release.set()
+                    response = await discovery
+                self.assertEqual(response.status_code, 200)

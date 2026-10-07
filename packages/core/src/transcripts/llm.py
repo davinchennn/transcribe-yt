@@ -7,7 +7,6 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 from transcripts.inference import PROVIDERS, inference_api_key, resolve_inference
-from transcripts.config import get_kimi_code_api_key
 
 
 class LLMError(RuntimeError):
@@ -23,7 +22,7 @@ def request_json(
         selection = resolve_inference(provider, model)
         config = PROVIDERS[selection.provider]
         label = config["label"]
-        key = get_kimi_code_api_key(api_key) if selection.provider == "kimi" else inference_api_key(selection, api_key)
+        key = inference_api_key(selection, api_key)
     except ValueError as exc:
         raise LLMError(str(exc)) from exc
 

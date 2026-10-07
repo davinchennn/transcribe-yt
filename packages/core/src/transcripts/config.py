@@ -71,34 +71,6 @@ def get_deepgram_api_key(api_key: Optional[str] = None) -> str:
     return api_key
 
 
-def get_kimi_code_api_key(api_key: Optional[str] = None) -> str:
-    """
-    Get Kimi Code API key from parameter, environment variable, or .env file.
-
-    Args:
-        api_key: Optional API key to use directly
-
-    Returns:
-        Kimi Code API key
-
-    Raises:
-        ValueError: If API key is not found
-    """
-    load_config()
-
-    if api_key:
-        return api_key
-
-    api_key = os.getenv("KIMI_CODE_API_KEY")
-    if not api_key or api_key == "your_api_key_here":
-        raise ValueError(
-            "Kimi Code API key not found. "
-            "Set KIMI_CODE_API_KEY environment variable or create a .env file."
-        )
-
-    return api_key
-
-
 def get_transcription_provider(provider: Optional[str] = None) -> Literal["assemblyai", "deepgram"]:
     """
     Get transcription provider from parameter, environment variable, or .env file.

@@ -118,6 +118,29 @@ class InferenceRequest(BaseModel):
     model: Optional[str] = Field(default=None, min_length=1, max_length=300)
 
 
+class InferenceModelResponse(BaseModel):
+    id: str
+    name: str
+    context_length: Optional[int] = None
+
+
+class InferenceProviderResponse(BaseModel):
+    id: Literal["kimi", "fireworks"]
+    label: str
+    configured: bool
+    default_model: str
+    models: List[InferenceModelResponse] = Field(default_factory=list)
+    catalog_status: Literal["ready", "stale", "error", "unconfigured"]
+    catalog_updated_at: Optional[str] = None
+    catalog_error: Optional[str] = None
+
+
+class InferenceOptionsResponse(BaseModel):
+    default_provider: Literal["kimi", "fireworks"]
+    default_model: str
+    providers: List[InferenceProviderResponse]
+
+
 class PassageSearchRequest(InferenceRequest):
     query: str = Field(min_length=1, max_length=500)
     mode: Literal["exact", "semantic"] = "exact"

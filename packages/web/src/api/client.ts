@@ -120,12 +120,21 @@ export interface InferenceSelection {
   model: string;
 }
 
+export interface InferenceModel {
+  id: string;
+  name: string;
+  context_length: number | null;
+}
+
 export interface InferenceProvider {
   id: string;
   label: string;
   configured: boolean;
   default_model: string;
-  models: string[];
+  models: InferenceModel[];
+  catalog_status: 'ready' | 'stale' | 'error' | 'unconfigured';
+  catalog_updated_at: string | null;
+  catalog_error: string | null;
 }
 
 export interface InferenceOptions {
@@ -136,6 +145,10 @@ export interface InferenceOptions {
 
 export async function getInferenceProviders(): Promise<InferenceOptions> {
   return fetchJson(`${API_BASE}/inference/providers`);
+}
+
+export async function refreshInferenceProviders(): Promise<InferenceOptions> {
+  return fetchJson(`${API_BASE}/inference/providers/refresh`, { method: 'POST' });
 }
 
 const API_BASE = '/api';

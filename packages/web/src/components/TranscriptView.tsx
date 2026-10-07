@@ -1,11 +1,13 @@
 import { useRef, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { FormEvent } from 'react';
 import type { InferenceSelection, JobDetail, NavigationNode, NavigationView, Passage, SearchMode, Transcript } from '../api/client';
-import { getInferenceProviders, searchTranscript } from '../api/client';
+import { getInferenceProviders, refreshInferenceProviders, searchTranscript } from '../api/client';
 import { useAnalyzeJob, useCreateNavigation, useJob, useNavigation, useUpdateNavigationSummaries } from '../hooks/useJobs';
 import { formatTime, passageUtterances, passageWords, selectedWords, transcriptDuration } from '../lib/navigation';
 import { isXVideoUrl } from '../lib/video';
+import { inferenceLabel } from '../lib/inference';
+import { InferenceSettings } from './InferenceSettings';
 import { NavigationCanvas } from './NavigationCanvas';
 import { NativeVideoPlayer } from './NativeVideoPlayer';
 import { YouTubePlayer } from './YouTubePlayer';
@@ -80,7 +82,8 @@ function TranscriptWorkspace({ data, view, onViewChange }: {
   const [searchMode, setSearchMode] = useState<SearchMode>('exact');
   const [copyMessage, setCopyMessage] = useState('');
   const video = useRef<VideoHandle>(null);
-  const providers = useQuery({ queryKey: ['inference-providers'], queryFn: getInferenceProviders, staleTime: 60_000 });
+  const queryClient = useQueryClient();
+  const providers = useQuery({ queryKey: ['inference-providers'], queryFn: getInferenceProviders, staleTime: 15 * 60_000 });
   const [customModel, setCustomModel] = useState(false);
   const [chosenInference, setChosenInference] = useState<InferenceSelection | undefined>(() => {
     try {
@@ -91,6 +94,17 @@ function TranscriptWorkspace({ data, view, onViewChange }: {
   const inference = chosenInference ?? (providers.data ? { provider: providers.data.default_provider, model: providers.data.default_model } : undefined);
   const selectedProvider = providers.data?.providers.find((item) => item.id === inference?.provider);
   const inferenceReady = !!inference?.model.trim() && !!selectedProvider?.configured;
+  const catalogRefresh = useMutation({
+    mutationFn: refreshInferenceProviders,
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: ['inference-providers'], exact: true });
+    },
+    onSuccess: (options) => queryClient.setQueryData(['inference-providers'], options),
+  });
+  const refreshModels = () => {
+    if (inference) setChosenInference(inference);
+    catalogRefresh.mutate();
+  };
   const changeInference = (value: InferenceSelection) => {
     setChosenInference(value);
     try { localStorage.setItem('analysis-inference', JSON.stringify(value)); } catch { /* Storage may be unavailable. */ }
@@ -165,33 +179,10 @@ function TranscriptWorkspace({ data, view, onViewChange }: {
       </div>
       {copyMessage && <p className="navigation-hint" role="status">{copyMessage}</p>}
 
-      <section className="nav-panel inference-settings" aria-label="Analysis settings">
-        <span className="section-eyebrow">Analysis settings</span>
-        {providers.isPending ? <p role="status">Loading providers…</p> : providers.isError ? <p className="nav-error" role="alert">{providers.error.message} <button className="nav-link" onClick={() => providers.refetch()}>Try again</button></p> : <>
-          <div className="inference-controls">
-            <label htmlFor="analysis-provider">Provider
-              <select id="analysis-provider" value={inference?.provider ?? ''} onChange={(event) => {
-                const provider = providers.data.providers.find((item) => item.id === event.target.value);
-                if (provider) { setCustomModel(false); changeInference({ provider: provider.id, model: provider.default_model }); }
-              }}>
-                {providers.data.providers.map((item) => <option key={item.id} value={item.id}>{item.label}{item.configured ? '' : ' · API key required'}</option>)}
-              </select>
-            </label>
-            <label htmlFor="analysis-model">Model
-              <select id="analysis-model" value={customModel || !selectedProvider?.models.includes(inference?.model ?? '') ? 'custom' : inference?.model ?? ''} onChange={(event) => {
-                setCustomModel(event.target.value === 'custom');
-                if (event.target.value !== 'custom') changeInference({ provider: inference!.provider, model: event.target.value });
-              }}>
-                {selectedProvider?.models.map((model) => <option key={model} value={model}>{model.split('/').pop()}</option>)}
-                <option value="custom">Custom model…</option>
-              </select>
-            </label>
-          </div>
-          {(customModel || (inference && !selectedProvider?.models.includes(inference.model))) && <label htmlFor="custom-analysis-model">Custom model ID <input id="custom-analysis-model" value={inference?.model ?? ''} onChange={(event) => changeInference({ provider: inference!.provider, model: event.target.value })} placeholder="Enter a model ID" /></label>}
-          <p className="navigation-hint">Used for summaries, timeline, topics, and Meaning search. Choose a suggested model or enter another model ID.</p>
-          {!selectedProvider?.configured && <p className="nav-error">Set {inference?.provider === 'fireworks' ? 'FIREWORKS_API_KEY' : 'KIMI_CODE_API_KEY'} in the server’s .env file to use this provider.</p>}
-        </>}
-      </section>
+      <InferenceSettings options={providers.data} inference={inference} customModel={customModel}
+        loading={providers.isPending && !catalogRefresh.isPending} refreshing={catalogRefresh.isPending}
+        error={catalogRefresh.isError ? `Could not refresh models: ${catalogRefresh.error.message}` : providers.isError ? `Could not load models: ${providers.error.message}` : undefined}
+        onChange={changeInference} onCustomModelChange={setCustomModel} onRefresh={refreshModels} />
 
       <div className="watch-layout">
         {isXVideoUrl(job.url)
@@ -243,8 +234,8 @@ function TranscriptWorkspace({ data, view, onViewChange }: {
             })}
           </div>
         </div>
-        {analysis?.status === 'completed' && <div className="subtopic-summary-update">
-          <span className="navigation-hint">Saved with {analysis.provider || 'kimi'} / {analysis.model}</span>
+        {analysis?.status === 'completed' && <div className="analysis-meta">
+          <span className="navigation-hint" title={analysis.model || undefined}>Saved with {inferenceLabel(providers.data, analysis.provider, analysis.model)}</span>
           {(analysis.provider || 'kimi') !== inference?.provider || analysis.model !== inference?.model ? <button className="nav-button compact" disabled={creation.isPending || !inferenceReady} onClick={createView}>Regenerate {viewLabel}</button> : null}
         </div>}
         {creation.isError && analysis?.status === 'completed' && <p className="nav-error" role="alert">{creation.error.message}</p>}
@@ -272,8 +263,10 @@ function TranscriptWorkspace({ data, view, onViewChange }: {
       <details className="nav-panel summary-panel">
         <summary>The conversation at a glance</summary>
         {data.analysis?.status === 'completed' ? <>
-          <p className="navigation-hint">Saved with {data.analysis.provider || 'kimi'} / {data.analysis.model}</p>
-          {((data.analysis.provider || 'kimi') !== inference?.provider || data.analysis.model !== inference?.model) && <button className="nav-button compact" disabled={summaryMutation.isPending || !inferenceReady} onClick={() => summaryMutation.mutate(job.id)}>Regenerate summary</button>}
+          <div className="analysis-meta">
+            <span className="navigation-hint" title={data.analysis.model || undefined}>Saved with {inferenceLabel(providers.data, data.analysis.provider, data.analysis.model)}</span>
+            {((data.analysis.provider || 'kimi') !== inference?.provider || data.analysis.model !== inference?.model) && <button className="nav-button compact" disabled={summaryMutation.isPending || !inferenceReady} onClick={() => summaryMutation.mutate(job.id)}>Regenerate summary</button>}
+          </div>
           {summaryMutation.isError && <p className="nav-error" role="alert">{summaryMutation.error.message}</p>}
           <p>{data.analysis.summary}</p>
           {data.analysis.key_points.length > 0 && <ul>{data.analysis.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul>}

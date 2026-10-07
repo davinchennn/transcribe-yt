@@ -47,17 +47,30 @@ Switching settings alone does not trigger inference.
 - **Kimi Code**: set `KIMI_CODE_API_KEY` in the root `.env` file. Default model: `k3`.
   Access is subject to your membership's client and usage restrictions.
 - **Fireworks AI**: set `FIREWORKS_API_KEY`. Default model: `accounts/fireworks/models/kimi-k3`.
-  The model menu also offers Ember-1. Choose **Custom model…** for another model
-  or deployment ID available to your account.
+  The model menu discovers available serverless chat models. Choose **Custom model…**
+  for another model or deployment ID available to your account.
 
 Keys stay on the server. Optional `ANALYSIS_PROVIDER` (`kimi` or `fireworks`),
 `KIMI_MODEL`, and `FIREWORKS_MODEL` environment variables set defaults.
-The Fireworks client uses the [chat completions API](https://docs.fireworks.ai/api-reference/post-chatcompletions);
-preset IDs come from [Kimi K3](https://fireworks.ai/models/fireworks/kimi-k3)
-and [Ember-1](https://fireworks.ai/models/fireworks/ember-1).
+Model catalogs are fetched on the server using each configured provider's key:
+Kimi Code's `/coding/v1/models`, and Fireworks' [List Models API](https://docs.fireworks.ai/api-reference/list-models)
+for the public `fireworks` account. The Fireworks list includes only ready,
+serverless models with chat support; embedding, reranking, and audio models are
+excluded. Catalogs provide model IDs, display names, and available context lengths.
 
-`GET /api/inference/providers` returns providers, suggested model IDs, defaults,
-and whether each key is configured (never the key). Analysis and navigation POSTs
+Catalogs are cached in the API process for 15 minutes. **Refresh models** refreshes
+configured providers without changing your selection or starting inference.
+Refresh failures preserve the last successful catalog and show its stale status;
+without a successful catalog, **Custom model…** remains available. Missing keys
+skip discovery. API restarts clear the catalog cache. Configured defaults and
+remembered custom IDs remain usable even when absent from the live catalog.
+The Fireworks client uses the [chat completions API](https://docs.fireworks.ai/api-reference/post-chatcompletions).
+
+`GET /api/inference/providers` returns providers, defaults, key availability (never
+keys), and each provider's `models` (`id`, `name`, `context_length`), `catalog_status`
+(`ready`, `stale`, `error`, `unconfigured`), `catalog_updated_at`, and `catalog_error`.
+`POST /api/inference/providers/refresh` forces discovery and returns the same shape.
+Analysis and navigation POSTs
 accept an optional `{"provider": "fireworks", "model": "accounts/fireworks/models/kimi-k3"}`
 body; search accepts these fields alongside `query` and `mode`. Omitted bodies
 preserve existing cache behavior. Explicitly selecting a different provider/model

@@ -7,16 +7,16 @@ from dataclasses import dataclass
 from typing import Optional
 
 from transcripts import config as app_config
+from transcripts.model_catalog import model_catalog
 
 KIMI_BASE_URL = "https://api.kimi.com/coding/v1"
 KIMI_MODEL = "k3"
 PROVIDERS = {
     "kimi": {"label": "Kimi Code", "base_url": KIMI_BASE_URL,
-             "key_env": "KIMI_CODE_API_KEY", "model_env": "KIMI_MODEL", "default_model": KIMI_MODEL, "models": [KIMI_MODEL]},
+             "key_env": "KIMI_CODE_API_KEY", "model_env": "KIMI_MODEL", "default_model": KIMI_MODEL},
     "fireworks": {"label": "Fireworks AI", "base_url": "https://api.fireworks.ai/inference/v1",
                   "key_env": "FIREWORKS_API_KEY", "model_env": "FIREWORKS_MODEL",
-                  "default_model": "accounts/fireworks/models/kimi-k3",
-                  "models": ["accounts/fireworks/models/kimi-k3", "accounts/fireworks/models/ember-1"]},
+                  "default_model": "accounts/fireworks/models/kimi-k3"},
 }
 
 
@@ -63,14 +63,14 @@ def inference_scope(selection: InferenceSelection):
         _selection.reset(token)
 
 
-def inference_options():
+def inference_options(*, force_refresh: bool = False):
     default = resolve_inference()
     providers = []
     for provider, config in PROVIDERS.items():
         selected = resolve_inference(provider)
         key = os.getenv(config["key_env"])
         providers.append({"id": provider, "label": config["label"],
-                          "configured": bool(key and key != "your_api_key_here"),
+                          "configured": bool(key and key.strip() and key.strip() != "your_api_key_here"),
                           "default_model": selected.model,
-                          "models": list(dict.fromkeys([selected.model, *config["models"]]))})
+                          **model_catalog(provider, key, config["base_url"], force_refresh=force_refresh)})
     return {"default_provider": default.provider, "default_model": default.model, "providers": providers}

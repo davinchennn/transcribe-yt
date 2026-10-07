@@ -1,7 +1,7 @@
 """Transcript summary analysis using the selected inference provider."""
 
 from typing import Optional
-from transcripts.inference import KIMI_BASE_URL, KIMI_MODEL, resolve_inference
+from transcripts.inference import resolve_inference
 from transcripts.llm import request_json
 from transcripts.models import Analysis, AnalysisStatus
 

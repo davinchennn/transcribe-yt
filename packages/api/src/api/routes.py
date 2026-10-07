@@ -28,6 +28,7 @@ from transcripts.storage.base import extract_video_id
 from api.schemas import (
     AnalysisResponse,
     InferenceRequest,
+    InferenceOptionsResponse,
     JobCreate,
     JobResponse,
     JobDetailResponse,
@@ -326,9 +327,22 @@ async def clear_jobs(
     return {"cleared": count}
 
 
-@router.get("/inference/providers")
+@router.get("/inference/providers", response_model=InferenceOptionsResponse)
 async def get_inference_providers():
-    return inference_options()
+    """Read catalogs, fetching configured providers when their cache expires."""
+    try:
+        return await run_in_threadpool(inference_options)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/inference/providers/refresh", response_model=InferenceOptionsResponse)
+async def refresh_inference_providers():
+    """Refresh catalogs without making inference requests or changing selection."""
+    try:
+        return await run_in_threadpool(inference_options, force_refresh=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def selected_inference(body: Optional[InferenceRequest]) -> InferenceSelection:

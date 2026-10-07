@@ -38,12 +38,28 @@ class InferenceTests(unittest.TestCase):
                 resolve_inference(provider, model)
 
     def test_options_never_expose_keys(self):
-        with patch.dict(os.environ, {'FIREWORKS_API_KEY': 'secret-key'}):
+        catalog = {'models': [{'id': 'discovered-model', 'name': 'Discovered model', 'context_length': 8192}],
+                   'catalog_status': 'ready', 'catalog_updated_at': '2026-10-07T12:00:00Z', 'catalog_error': None}
+        with patch.dict(os.environ, {'FIREWORKS_API_KEY': 'secret-key'}), \
+                patch('transcripts.inference.model_catalog', return_value=catalog) as discovery:
             options = inference_options()
         self.assertNotIn('secret-key', json.dumps(options))
         self.assertFalse(options['providers'][0]['configured'])
         self.assertTrue(options['providers'][1]['configured'])
-        self.assertIn('accounts/fireworks/models/ember-1', options['providers'][1]['models'])
+        self.assertEqual(options['providers'][1]['models'], catalog['models'])
+        self.assertEqual(options['providers'][1]['catalog_status'], 'ready')
+        self.assertEqual(discovery.call_args.args, ('fireworks', 'secret-key', 'https://api.fireworks.ai/inference/v1'))
+        self.assertEqual(discovery.call_args.kwargs, {'force_refresh': False})
+
+    def test_options_force_refresh_keeps_custom_defaults_out_of_catalog(self):
+        catalog = {'models': [], 'catalog_status': 'unconfigured',
+                   'catalog_updated_at': None, 'catalog_error': None}
+        with patch.dict(os.environ, {'FIREWORKS_MODEL': 'custom-model'}), \
+                patch('transcripts.inference.model_catalog', return_value=catalog) as discovery:
+            options = inference_options(force_refresh=True)
+        self.assertEqual(options['providers'][1]['default_model'], 'custom-model')
+        self.assertEqual(options['providers'][1]['models'], [])
+        self.assertTrue(all(call.kwargs['force_refresh'] for call in discovery.call_args_list))
 
     def test_fireworks_request_and_analysis_metadata(self):
         data = {'choices': [{'message': {'content': '{"summary":"Summary","key_points":["Point"]}'}}]}
