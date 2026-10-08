@@ -1,14 +1,16 @@
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { FormEvent } from 'react';
-import type { InferenceSelection, JobDetail, NavigationNode, NavigationView, Passage, SearchMode, Transcript } from '../api/client';
+import type { InferenceSelection, JobDetail, NavigationView, Passage, SavedAnalysis, SearchMode, Transcript } from '../api/client';
 import { getInferenceProviders, refreshInferenceProviders, searchTranscript } from '../api/client';
-import { useAnalyzeJob, useCreateNavigation, useJob, useNavigation, useUpdateNavigationSummaries } from '../hooks/useJobs';
+import { useAnalyses, useCreateAnalysis, useDeleteAnalysis, useJob } from '../hooks/useJobs';
 import { formatTime, passageUtterances, passageWords, selectedWords, transcriptDuration } from '../lib/navigation';
+import { analysisDate, analysisOptions, analysisViewLabel, newestAnalyses, selectAnalysis } from '../lib/analyses';
 import { isXVideoUrl } from '../lib/video';
-import { inferenceLabel } from '../lib/inference';
+import { AnalysisForm } from './AnalysisForm';
+import type { AnalysisDraft } from './AnalysisForm';
 import { InferenceSettings } from './InferenceSettings';
-import { NavigationCanvas } from './NavigationCanvas';
+import { SavedAnalysisDetails } from './SavedAnalysisDetails';
 import { NativeVideoPlayer } from './NativeVideoPlayer';
 import { YouTubePlayer } from './YouTubePlayer';
 import { VideoReference } from './VideoReference';
@@ -17,20 +19,9 @@ import type { VideoHandle } from './YouTubePlayer';
 
 interface TranscriptViewProps {
   jobId: string;
-  view: NavigationView;
-  onViewChange: (view: NavigationView) => void;
-}
-
-function isProcessing(status?: string): boolean {
-  return status === 'pending' || status === 'processing';
-}
-
-function needsSubtopicSummaries(nodes: NavigationNode[], depth = 0): boolean {
-  return nodes.some((node) => {
-    const words = node.summary?.trim().split(/\s+/).filter(Boolean).length ?? 0;
-    return (depth > 0 && (words === 0 || words > 20))
-      || needsSubtopicSummaries(node.children, depth + 1);
-  });
+  analysisId?: string;
+  view?: NavigationView;
+  onAnalysisChange: (analysisId?: string) => void;
 }
 
 function PassageDetail({ transcript, passage, currentTime, onSeek }: {
@@ -68,19 +59,29 @@ function PassageDetail({ transcript, passage, currentTime, onSeek }: {
   );
 }
 
-function TranscriptWorkspace({ data, view, onViewChange }: {
+
+function TranscriptWorkspace({ data, analysisId, view, onAnalysisChange }: {
   data: JobDetail & { transcript: Transcript };
-  view: NavigationView;
-  onViewChange: (view: NavigationView) => void;
+  analysisId?: string;
+  view?: NavigationView;
+  onAnalysisChange: (analysisId?: string) => void;
 }) {
   const { job, transcript } = data;
-  const [timelineSelection, setTimelineSelection] = useState<{ analysisKey: string; ids: string[] }>({ analysisKey: '', ids: [] });
-  const [selected, setSelected] = useState<Passage | null>(null);
+  const analysesQuery = useAnalyses(job.id, data.analyses);
+  const analyses = newestAnalyses(analysesQuery.data ?? []);
+  const analysis = selectAnalysis(analyses, analysisId, view);
+  const selectionScope = analysis?.id ?? analysisId ?? '';
+  const [selection, setSelection] = useState<{ analysisId: string; ids: string[]; passage: Passage | null }>({ analysisId: selectionScope, ids: [], passage: null });
+  if (selection.analysisId !== selectionScope) setSelection({ analysisId: selectionScope, ids: [], passage: null });
+  const selected = selection.analysisId === selectionScope ? selection.passage : null;
   const [selectedTime, setSelectedTime] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [query, setQuery] = useState('');
   const [searchMode, setSearchMode] = useState<SearchMode>('exact');
   const [copyMessage, setCopyMessage] = useState('');
+  const [draft, setDraft] = useState<AnalysisDraft | null>(null);
+  const [draftInference, setDraftInference] = useState<InferenceSelection | undefined>();
+  const [draftCustomModel, setDraftCustomModel] = useState(false);
   const video = useRef<VideoHandle>(null);
   const queryClient = useQueryClient();
   const providers = useQuery({ queryKey: ['inference-providers'], queryFn: getInferenceProviders, staleTime: 15 * 60_000 });
@@ -92,58 +93,61 @@ function TranscriptWorkspace({ data, view, onViewChange }: {
     } catch { return undefined; }
   });
   const inference = chosenInference ?? (providers.data ? { provider: providers.data.default_provider, model: providers.data.default_model } : undefined);
-  const selectedProvider = providers.data?.providers.find((item) => item.id === inference?.provider);
-  const inferenceReady = !!inference?.model.trim() && !!selectedProvider?.configured;
+  const formInference = draftInference ?? inference;
+  const inferenceReady = (selection: InferenceSelection | undefined) => !!selection?.model.trim() && !!providers.data?.providers.find((item) => item.id === selection.provider)?.configured;
   const catalogRefresh = useMutation({
     mutationFn: refreshInferenceProviders,
-    onMutate: async () => {
-      await queryClient.cancelQueries({ queryKey: ['inference-providers'], exact: true });
-    },
+    onMutate: async () => { await queryClient.cancelQueries({ queryKey: ['inference-providers'], exact: true }); },
     onSuccess: (options) => queryClient.setQueryData(['inference-providers'], options),
   });
+  const providerError = catalogRefresh.isError ? `Could not refresh models: ${catalogRefresh.error.message}` : providers.isError ? `Could not load models: ${providers.error.message}` : undefined;
   const refreshModels = () => {
     if (inference) setChosenInference(inference);
+    if (formInference) setDraftInference(formInference);
     catalogRefresh.mutate();
   };
+  const search = useMutation({ mutationFn: ({ query, mode }: { query: string; mode: SearchMode }) => searchTranscript(job.id, query, mode, inference) });
   const changeInference = (value: InferenceSelection) => {
     setChosenInference(value);
     try { localStorage.setItem('analysis-inference', JSON.stringify(value)); } catch { /* Storage may be unavailable. */ }
     search.reset();
   };
-  const activeQuery = useNavigation(job.id, view);
-  const creation = useCreateNavigation(job.id, inference);
-  const summaryUpdate = useUpdateNavigationSummaries(job.id, inference);
-  const summaryMutation = useAnalyzeJob(inference);
-  const search = useMutation({ mutationFn: ({ query, mode }: { query: string; mode: SearchMode }) => searchTranscript(job.id, query, mode, inference) });
-  const analysis = activeQuery.isError || (activeQuery.isFetching && !isProcessing(activeQuery.data?.status))
-    ? undefined : activeQuery.data;
-  const creating = (creation.isPending && creation.variables === view) || isProcessing(analysis?.status);
-  const checking = activeQuery.isFetching && !creating;
+  const creation = useCreateAnalysis(job.id);
+  const deletion = useDeleteAnalysis(job.id);
   const duration = transcriptDuration(transcript);
-  const viewLabel = view === 'timeline' ? 'Timeline' : 'Topics';
-  const timelineAnalysisKey = `${job.id}:${(view === 'timeline' ? analysis : data.navigation?.timeline)?.updated_at ?? ''}`;
-
   const seek = (time: number) => {
     setSelectedTime(time);
     video.current?.seek(time);
   };
   const selectPassage = (passage: Passage) => {
-    setSelected(passage);
+    setSelection((previous) => ({ ...previous, analysisId: selectionScope, passage }));
     seek(passage.match_start ?? passage.start);
   };
-  const createView = () => {
+  const beginAnalysis = (source?: SavedAnalysis) => {
     creation.reset();
-    creation.mutate(view);
+    setDraft({ name: source?.name ?? '', view: source?.view ?? view ?? 'timeline', prompt: source?.prompt ?? '', sourceId: source?.id });
+    setDraftInference(source?.provider && source.model ? { provider: source.provider, model: source.model } : inference);
+    setDraftCustomModel(false);
   };
-  const updateSummaries = () => {
-    summaryUpdate.reset();
-    summaryUpdate.mutate(view, {
-      onSuccess: (updated) => {
-        if (updated.view === 'timeline') {
-          setTimelineSelection((previous) => ({ ...previous, analysisKey: `${job.id}:${updated.updated_at}` }));
-        }
+  const submitAnalysis = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!draft || !formInference || !inferenceReady(formInference)) return;
+    creation.mutate({ options: analysisOptions(draft.name, draft.view, draft.prompt, formInference), sourceId: draft.sourceId }, {
+      onSuccess: (created) => {
+        setDraft(null);
+        onAnalysisChange(created.id);
       },
     });
+  };
+  const selectSavedAnalysis = (id?: string) => {
+    setDraft(null);
+    creation.reset();
+    deletion.reset();
+    onAnalysisChange(id);
+  };
+  const deleteSelectedAnalysis = () => {
+    if (!analysis) return;
+    deletion.mutate(analysis.id, { onSuccess: () => selectSavedAnalysis() });
   };
   const submitSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -153,9 +157,7 @@ function TranscriptWorkspace({ data, view, onViewChange }: {
     try {
       await navigator.clipboard.writeText(transcript.transcript_text);
       setCopyMessage('Transcript copied');
-    } catch {
-      setCopyMessage('Copy failed. Download the transcript instead.');
-    }
+    } catch { setCopyMessage('Copy failed. Download the transcript instead.'); }
   };
   const download = (format: 'txt' | 'json') => {
     const content = format === 'json' ? JSON.stringify(transcript, null, 2) : transcript.utterances.map((u) => `[${formatTime(u.start)}] ${u.speaker}: ${u.text}`).join('\n\n');
@@ -167,137 +169,91 @@ function TranscriptWorkspace({ data, view, onViewChange }: {
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
   };
 
-  return (
-    <>
-      <div className="transcript-toolbar">
-        <div className="transcript-statline"><span><strong>{formatTime(duration)}</strong> running time</span><span><strong>{transcript.utterances.length.toLocaleString()}</strong> speaker turns</span></div>
-        <div className="transcript-actions">
-          <button className="nav-button compact" onClick={copyTranscript}>Copy transcript</button>
-          <button className="nav-button compact" onClick={() => download('txt')}>Download TXT</button>
-          <button className="nav-button compact" onClick={() => download('json')}>Download JSON</button>
+  return <>
+    <div className="transcript-toolbar">
+      <div className="transcript-statline"><span><strong>{formatTime(duration)}</strong> running time</span><span><strong>{transcript.utterances.length.toLocaleString()}</strong> speaker turns</span></div>
+      <div className="transcript-actions">
+        <button className="nav-button compact" onClick={copyTranscript}>Copy transcript</button>
+        <button className="nav-button compact" onClick={() => download('txt')}>Download TXT</button>
+        <button className="nav-button compact" onClick={() => download('json')}>Download JSON</button>
+      </div>
+    </div>
+    {copyMessage && <p className="navigation-hint" role="status">{copyMessage}</p>}
+
+    <div className="watch-layout">
+      {isXVideoUrl(job.url)
+        ? <NativeVideoPlayer ref={video} jobId={job.id} url={job.url} title={job.title || 'X video'} available={transcript.video_available ?? job.video_available ?? false} selectedTime={selectedTime} onTimeChange={setCurrentTime} />
+        : <YouTubePlayer ref={video} url={job.url} title={job.title || 'YouTube video'} selectedTime={selectedTime} onTimeChange={setCurrentTime} />}
+      <PassageDetail transcript={transcript} passage={selected} currentTime={currentTime} onSeek={seek} />
+    </div>
+
+    <section className="nav-panel search-panel" aria-label="Search this video">
+      <form onSubmit={submitSearch} className="transcript-search">
+        <div className="search-input-group">
+          <label htmlFor="transcript-search" className="section-eyebrow">Search the conversation</label>
+          <input id="transcript-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchMode === 'exact' ? 'Words or a phrase from this video…' : 'Describe an idea, e.g. why growth slowed…'} />
+        </div>
+        <div className="search-controls">
+          <label className="sr-only" htmlFor="search-mode">Search mode</label>
+          <select id="search-mode" value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}><option value="exact">Exact words</option><option value="semantic">Meaning</option></select>
+          <button className="nav-button primary" type="submit" disabled={search.isPending || !query.trim() || (searchMode === 'semantic' && !inferenceReady(inference))}>{search.isPending ? 'Searching…' : 'Search'}</button>
+          {(search.data || search.isError) && <button className="nav-button compact" type="button" onClick={() => search.reset()}>Clear results</button>}
+        </div>
+      </form>
+      {searchMode === 'semantic' && <InferenceSettings options={providers.data} inference={inference} customModel={customModel}
+        heading="Meaning search settings" description="Used to find ideas across this video." idPrefix="search"
+        loading={providers.isPending && !catalogRefresh.isPending} refreshing={catalogRefresh.isPending} error={providerError}
+        onChange={changeInference} onCustomModelChange={setCustomModel} onRefresh={refreshModels} />}
+      {search.isPending && <p role="status" className="navigation-hint">Finding passages in this video…</p>}
+      {search.isError && <p className="nav-error" role="alert">{search.error.message}</p>}
+      {search.data && <div className="search-results">
+        <p className="navigation-hint" role="status">{search.data.results.length} passage{search.data.results.length === 1 ? '' : 's'} for “{search.data.query}” · {search.data.mode === 'semantic' ? 'Meaning' : 'Exact words'}</p>
+        {search.data.error && <p className="nav-error" role="alert">{search.data.error}</p>}
+        {search.data.results.map((passage) => <button key={passage.id} className={`search-result ${selected?.id === passage.id ? 'is-selected' : ''}`} onClick={() => selectPassage(passage)}><span className="tile-time">{formatTime(passage.start)}–{formatTime(passage.end)} ↗</span><span>{passage.text}</span></button>)}
+        {search.data.results.length === 0 && !search.data.error && <p className="nav-empty">No passages found. Try different words or switch to Meaning.</p>}
+      </div>}
+    </section>
+
+    <section className="nav-panel exploration-panel" aria-label="Analyses of this video">
+      <div className="exploration-header">
+        <div><span className="section-eyebrow">Analyses</span><h2>Explore the conversation</h2></div>
+        <div className="analysis-selector-controls">
+          {analyses.length > 0 && <label htmlFor="saved-analysis" className="analysis-selector-label"><span className="sr-only">Saved analysis</span><select id="saved-analysis" value={analysis?.id ?? ''} onChange={(event) => selectSavedAnalysis(event.target.value)}>
+            {!analysis && <option value="">Choose a saved analysis</option>}
+            {analyses.map((item) => <option key={item.id} value={item.id}>{item.name} · {analysisViewLabel(item.view)} · {analysisDate(item.created_at)}{item.status !== 'completed' ? ` · ${item.status}` : ''}</option>)}
+          </select></label>}
+          <button className="nav-button primary" disabled={creation.isPending} onClick={() => beginAnalysis()}>New analysis</button>
         </div>
       </div>
-      {copyMessage && <p className="navigation-hint" role="status">{copyMessage}</p>}
-
-      <InferenceSettings options={providers.data} inference={inference} customModel={customModel}
-        loading={providers.isPending && !catalogRefresh.isPending} refreshing={catalogRefresh.isPending}
-        error={catalogRefresh.isError ? `Could not refresh models: ${catalogRefresh.error.message}` : providers.isError ? `Could not load models: ${providers.error.message}` : undefined}
-        onChange={changeInference} onCustomModelChange={setCustomModel} onRefresh={refreshModels} />
-
-      <div className="watch-layout">
-        {isXVideoUrl(job.url)
-          ? <NativeVideoPlayer ref={video} jobId={job.id} url={job.url} title={job.title || 'X video'} available={transcript.video_available ?? job.video_available ?? false} selectedTime={selectedTime} onTimeChange={setCurrentTime} />
-          : <YouTubePlayer ref={video} url={job.url} title={job.title || 'YouTube video'} selectedTime={selectedTime} onTimeChange={setCurrentTime} />}
-        <PassageDetail transcript={transcript} passage={selected} currentTime={currentTime} onSeek={seek} />
-      </div>
-
-      <section className="nav-panel search-panel" aria-label="Search this video">
-        <form onSubmit={submitSearch} className="transcript-search">
-          <div className="search-input-group">
-            <label htmlFor="transcript-search" className="section-eyebrow">Search the conversation</label>
-            <input id="transcript-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchMode === 'exact' ? 'Words or a phrase from this video…' : 'Describe an idea, e.g. why growth slowed…'} />
-          </div>
-          <div className="search-controls">
-            <label className="sr-only" htmlFor="search-mode">Search mode</label>
-            <select id="search-mode" value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
-              <option value="exact">Exact words</option><option value="semantic">Meaning</option>
-            </select>
-            <button className="nav-button primary" type="submit" disabled={search.isPending || !query.trim() || (searchMode === 'semantic' && !inferenceReady)}>{search.isPending ? 'Searching…' : 'Search'}</button>
-            {(search.data || search.isError) && <button className="nav-button compact" type="button" onClick={() => search.reset()}>Clear results</button>}
-          </div>
-        </form>
-        {search.isPending && <p role="status" className="navigation-hint">Finding passages in this video…</p>}
-        {search.isError && <p className="nav-error" role="alert">{search.error.message}</p>}
-        {search.data && <div className="search-results">
-          <p className="navigation-hint" role="status">{search.data.results.length} passage{search.data.results.length === 1 ? '' : 's'} for “{search.data.query}” · {search.data.mode === 'semantic' ? 'Meaning' : 'Exact words'}</p>
-          {search.data.error && <p className="nav-error" role="alert">{search.data.error}</p>}
-          {search.data.results.map((passage) => <button key={passage.id} className={`search-result ${selected?.id === passage.id ? 'is-selected' : ''}`} onClick={() => selectPassage(passage)}>
-            <span className="tile-time">{formatTime(passage.start)}–{formatTime(passage.end)} ↗</span>
-            <span>{passage.text}</span>
-          </button>)}
-          {search.data.results.length === 0 && !search.data.error && <p className="nav-empty">No passages found. Try different words or switch to Meaning.</p>}
-        </div>}
-      </section>
-
-      <section className="nav-panel exploration-panel" aria-label="Explore this video">
-        <div className="exploration-header">
-          <div><span className="section-eyebrow">Navigation</span><h2>Explore the conversation</h2></div>
-          <div className="view-switch" role="group" aria-label="Navigation view">
-            {(['timeline', 'topics'] as const).map((item) => {
-              const saved = item === view ? analysis : data.navigation?.[item];
-              return <button key={item} className={item === view ? 'is-active' : ''} aria-pressed={item === view} onClick={() => {
-                if (item === view) void activeQuery.refetch();
-                else onViewChange(item);
-              }}>
-                {item === 'timeline' ? 'Timeline' : 'Topics'}<span>{item === view && checking ? 'Checking…' : saved?.status === 'completed' ? 'Ready' : isProcessing(saved?.status) ? 'Creating…' : 'Not created'}</span>
-              </button>;
-            })}
-          </div>
-        </div>
-        {analysis?.status === 'completed' && <div className="analysis-meta">
-          <span className="navigation-hint" title={analysis.model || undefined}>Saved with {inferenceLabel(providers.data, analysis.provider, analysis.model)}</span>
-          {(analysis.provider || 'kimi') !== inference?.provider || analysis.model !== inference?.model ? <button className="nav-button compact" disabled={creation.isPending || !inferenceReady} onClick={createView}>Regenerate {viewLabel}</button> : null}
-        </div>}
-        {creation.isError && analysis?.status === 'completed' && <p className="nav-error" role="alert">{creation.error.message}</p>}
-        {checking && <p className="nav-loading" role="status">Checking saved {viewLabel.toLowerCase()}…</p>}
-        {activeQuery.isError && <p className="nav-error" role="alert">Could not load this view: {activeQuery.error.message} <button className="nav-link" onClick={() => activeQuery.refetch()}>Try again</button></p>}
-        {analysis?.status === 'completed' && (needsSubtopicSummaries(analysis.nodes) || (summaryUpdate.isPending && summaryUpdate.variables === view)) && <div className="subtopic-summary-update">
-          <button className="nav-button compact" disabled={summaryUpdate.isPending || !inferenceReady} onClick={updateSummaries}>{summaryUpdate.isPending && summaryUpdate.variables === view ? 'Updating summaries…' : 'Update summaries'}</button>
-          <span className="navigation-hint">20 words or fewer per subtopic, using terms from this transcript.</span>
-        </div>}
-        {summaryUpdate.isError && summaryUpdate.variables === view && <p className="nav-error" role="alert">Could not update subtopic summaries: {summaryUpdate.error.message}</p>}
-        {creating ? <div className="creation-state" role="status" aria-live="polite"><span className="creation-spinner" /><h3>Creating {viewLabel.toLowerCase()}…</h3><p>Analyzing this transcript. The view will appear here when it is ready.</p></div> : analysis?.status === 'completed' ? (
-          <NavigationCanvas analysis={analysis} duration={duration} currentTime={currentTime} selected={selected} onSelect={selectPassage}
-            timelineSelection={timelineSelection.analysisKey === timelineAnalysisKey ? timelineSelection.ids : []}
-            onTimelineSelectionChange={(ids) => setTimelineSelection({ analysisKey: timelineAnalysisKey, ids })} />
-        ) : !checking && !activeQuery.isError ? <div className="creation-state">
-          <span className="view-icon" aria-hidden="true">{view === 'timeline' ? '▥' : '≋'}</span>
-          <h3>{view === 'timeline' ? 'See how the discussion unfolds' : 'Find subjects wherever they recur'}</h3>
-          <p>{view === 'timeline' ? 'Create chronological chapters and nested subtopics. Keep the chapter overview visible while selecting subtopics to explore.' : 'Create a hierarchy of subjects and subtopics. See every level together, with each occurrence mapped across the video.'}</p>
-          {(analysis?.status === 'failed' || (creation.isError && creation.variables === view)) && <p className="nav-error" role="alert">{analysis?.error || creation.error?.message || 'Analysis failed. Try again.'}</p>}
-          <button className="nav-button primary" onClick={createView} disabled={creation.isPending || !inferenceReady}>{analysis?.status === 'failed' ? `Retry ${viewLabel}` : `Create ${viewLabel}`}</button>
-          <span className="navigation-hint">Created only when you ask. Saved for this video.</span>
-        </div> : null}
-      </section>
-
-      <details className="nav-panel summary-panel">
-        <summary>The conversation at a glance</summary>
-        {data.analysis?.status === 'completed' ? <>
-          <div className="analysis-meta">
-            <span className="navigation-hint" title={data.analysis.model || undefined}>Saved with {inferenceLabel(providers.data, data.analysis.provider, data.analysis.model)}</span>
-            {((data.analysis.provider || 'kimi') !== inference?.provider || data.analysis.model !== inference?.model) && <button className="nav-button compact" disabled={summaryMutation.isPending || !inferenceReady} onClick={() => summaryMutation.mutate(job.id)}>Regenerate summary</button>}
-          </div>
-          {summaryMutation.isError && <p className="nav-error" role="alert">{summaryMutation.error.message}</p>}
-          <p>{data.analysis.summary}</p>
-          {data.analysis.key_points.length > 0 && <ul>{data.analysis.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul>}
-        </> : isProcessing(data.analysis?.status) ? <p role="status">Analyzing summary…</p> : <>
-          {data.analysis?.error && <p className="nav-error" role="alert">{data.analysis.error}</p>}
-          {summaryMutation.isError && <p className="nav-error" role="alert">{summaryMutation.error.message}</p>}
-          <button className="nav-button compact" disabled={summaryMutation.isPending || !inferenceReady} onClick={() => summaryMutation.mutate(job.id)}>{summaryMutation.isPending ? 'Starting…' : data.analysis?.status === 'failed' ? 'Retry summary' : 'Create summary'}</button>
-        </>}
-      </details>
-    </>
-  );
+      {draft && <AnalysisForm draft={draft} onChange={setDraft} onSubmit={submitAnalysis} onCancel={() => { setDraft(null); creation.reset(); }} submitting={creation.isPending} ready={inferenceReady(formInference)} error={creation.isError ? creation.error.message : undefined}
+        inferenceSettings={<InferenceSettings options={providers.data} inference={formInference} customModel={draftCustomModel} idPrefix="new-analysis" description="Used for this new analysis version."
+          loading={providers.isPending && !catalogRefresh.isPending} refreshing={catalogRefresh.isPending} error={providerError}
+          onChange={setDraftInference} onCustomModelChange={setDraftCustomModel} onRefresh={refreshModels} />} />}
+      {analysesQuery.isError && <p className="nav-error" role="alert">Could not load saved analyses: {analysesQuery.error.message} <button className="nav-link" onClick={() => analysesQuery.refetch()}>Try again</button></p>}
+      {deletion.isError && <p className="nav-error" role="alert">Could not delete analysis: {deletion.error.message}</p>}
+      {analysis ? <SavedAnalysisDetails analysis={analysis} providers={providers.data} duration={duration} currentTime={currentTime} selected={selected} onSelect={selectPassage}
+        timelineSelection={selection.analysisId === analysis.id ? selection.ids : []} onTimelineSelectionChange={(ids) => setSelection((previous) => ({ ...previous, analysisId: analysis.id, ids }))}
+        onRegenerate={() => beginAnalysis(analysis)} onDelete={deleteSelectedAnalysis} deleting={deletion.isPending} />
+        : analysesQuery.isPending || analysesQuery.isFetching ? <p className="nav-loading" role="status">Loading saved analyses…</p>
+          : analysisId !== undefined ? <p className="nav-error" role="alert">Analysis “{analysisId}” was not found for this video. <button className="nav-link" onClick={() => selectSavedAnalysis()}>Show newest analysis</button></p>
+            : !analysesQuery.isError && !draft ? <div className="creation-state"><h3>Give the conversation a perspective</h3><p>Create an analysis with a summary and either a Timeline or Topics visualization. Add a prompt to refine its focus.</p></div> : null}
+    </section>
+  </>;
 }
 
-export function TranscriptView({ jobId, view, onViewChange }: TranscriptViewProps) {
+export function TranscriptView({ jobId, analysisId, view, onAnalysisChange }: TranscriptViewProps) {
   const { data, isLoading, error } = useJob(jobId);
-  return (
-    <main className="transcript-page animate-fade-in">
-      <RouteLink className="transcript-back" href="/">← The archive</RouteLink>
-      {isLoading && <div className="transcript-loading" role="status"><div className="skeleton h-8 w-2/3 mb-6" /><div className="skeleton h-72 w-full" /><span className="sr-only">Loading transcript</span></div>}
-      {error && <p className="nav-error" role="alert">Error loading transcript: {error.message}</p>}
-      {data && <>
-        <header className="transcript-header">
-          <span className="section-eyebrow">{isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} · Transcript &amp; visual guide</span>
-          <h1>{data.job.title || 'Untitled video'}</h1>
-          <div className="transcript-reference">
-            <a href={data.job.url} target="_blank" rel="noopener noreferrer">View original on {isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} ↗</a>
-            <VideoReference id={data.job.id} />
-          </div>
-        </header>
-        {data.transcript ? <TranscriptWorkspace key={jobId} data={{ ...data, transcript: data.transcript }} view={view} onViewChange={onViewChange} /> : <p className="nav-empty">No transcript available.</p>}
-      </>}
-    </main>
-  );
+  return <main className="transcript-page animate-fade-in">
+    <RouteLink className="transcript-back" href="/">← The archive</RouteLink>
+    {isLoading && <div className="transcript-loading" role="status"><div className="skeleton h-8 w-2/3 mb-6" /><div className="skeleton h-72 w-full" /><span className="sr-only">Loading transcript</span></div>}
+    {error && <p className="nav-error" role="alert">Error loading transcript: {error.message}</p>}
+    {data && <>
+      <header className="transcript-header">
+        <span className="section-eyebrow">{isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} · Transcript &amp; analyses</span>
+        <h1>{data.job.title || 'Untitled video'}</h1>
+        <div className="transcript-reference"><a href={data.job.url} target="_blank" rel="noopener noreferrer">View original on {isXVideoUrl(data.job.url) ? 'X' : 'YouTube'} ↗</a><VideoReference id={data.job.id} /></div>
+      </header>
+      {data.transcript ? <TranscriptWorkspace key={jobId} data={{ ...data, transcript: data.transcript }} analysisId={analysisId} view={view} onAnalysisChange={onAnalysisChange} /> : <p className="nav-empty">No transcript available.</p>}
+    </>}
+  </main>;
 }

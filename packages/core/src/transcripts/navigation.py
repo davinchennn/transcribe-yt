@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from transcripts.inference import resolve_inference
+from transcripts.analyzer import with_focus_prompt
 from transcripts.llm import request_json
 from transcripts.models import AnalysisStatus, NavigationAnalysis, Transcript, derive_utterances
 
@@ -317,13 +318,13 @@ def _catalog_batches(nodes: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any
     return batches
 
 
-def _regroup_timeline(nodes: List[Dict[str, Any]], api_key: Optional[str]) -> List[Dict[str, Any]]:
+def _regroup_timeline(nodes: List[Dict[str, Any]], api_key: Optional[str], focus: str = "") -> List[Dict[str, Any]]:
     """Group chronological chunk chapters without changing their source coverage."""
     if len(nodes) <= 1:
         return nodes
     batches = _catalog_batches(nodes)
     if len(batches) > 1:
-        nodes = [item for batch in batches for item in _regroup_timeline(batch, api_key)]
+        nodes = [item for batch in batches for item in _regroup_timeline(batch, api_key, focus)]
         if len(_catalog_batches(nodes)) > 1:
             raise NavigationError("Timeline chapter catalog is too large to regroup safely")
     prompt = COMMON_PROMPT + """
@@ -336,7 +337,7 @@ chapters will be attached beneath your groups. Avoid one group per record.
 """
     records = [{"index": index, "title": node["title"], "summary": node["summary"]}
                for index, node in enumerate(nodes)]
-    result = request_json(prompt, json.dumps(records, ensure_ascii=False), api_key=api_key)
+    result = request_json(with_focus_prompt(prompt, focus), json.dumps(records, ensure_ascii=False), api_key=api_key)
     _summary(result)
     groups = _validate_timeline(result.get("nodes"), 0, len(nodes) - 1)
     for group in groups:
@@ -381,12 +382,12 @@ def _topic_sources(nodes: Sequence[Dict[str, Any]], parents: Tuple[str, ...] = (
     return sources
 
 
-def _regroup_topics(nodes: List[Dict[str, Any]], api_key: Optional[str]) -> List[Dict[str, Any]]:
+def _regroup_topics(nodes: List[Dict[str, Any]], api_key: Optional[str], focus: str = "") -> List[Dict[str, Any]]:
     """Merge subjects across excerpts using references, never model-generated ranges."""
     nodes = _topic_sources(nodes)
     batches = _catalog_batches(nodes)
     if len(batches) > 1:
-        nodes = _topic_sources([item for batch in batches for item in _regroup_topics(batch, api_key)])
+        nodes = _topic_sources([item for batch in batches for item in _regroup_topics(batch, api_key, focus)])
         if len(_catalog_batches(nodes)) > 1:
             raise NavigationError("Topic catalog is too large to merge safely")
     if len(nodes) <= 1:
@@ -406,7 +407,7 @@ Do not fabricate source IDs, ranges, or timestamps.
 """
     records = [{"index": index, "title": node["title"], "summary": node["summary"]}
                for index, node in enumerate(nodes)]
-    result = request_json(prompt, json.dumps(records, ensure_ascii=False), api_key=api_key)
+    result = request_json(with_focus_prompt(prompt, focus), json.dumps(records, ensure_ascii=False), api_key=api_key)
     _summary(result)
     used = set()
     count = [0]
@@ -622,7 +623,8 @@ def _read_subtopic_summaries(raw: Any, node_ids: Sequence[str]) -> Dict[str, str
 
 
 def summarize_subtopics(
-    transcript: Transcript, analysis: NavigationAnalysis, api_key: Optional[str] = None
+    transcript: Transcript, analysis: NavigationAnalysis, api_key: Optional[str] = None,
+    *, prompt: str = "",
 ) -> NavigationAnalysis:
     """Enrich deficient cached summaries without changing or mutating the view.
 
@@ -643,7 +645,7 @@ def summarize_subtopics(
     completed = {}
     for batch in _summary_batches(transcript, analysis, records):
         ids = [record["node_id"] for record in batch]
-        response = request_json(SUBTOPIC_SUMMARY_PROMPT, _summary_input(transcript, analysis, batch), api_key=api_key)
+        response = request_json(with_focus_prompt(SUBTOPIC_SUMMARY_PROMPT, prompt), _summary_input(transcript, analysis, batch), api_key=api_key)
         summaries = _read_subtopic_summaries(response, ids)
         invalid = [record for record in batch if not _has_summary_word_count(summaries[record["node_id"]])]
         if invalid:
@@ -659,7 +661,7 @@ The previous_word_count field is the exact measured count. Write a nonempty summ
 with at most maximum_word_count (20) words; shorter summaries are valid. Keep the
 factual source terms, repair the length, and count again before responding.
 """
-            repaired = request_json(repair_prompt, _summary_input(transcript, analysis, corrections), api_key=api_key)
+            repaired = request_json(with_focus_prompt(repair_prompt, prompt), _summary_input(transcript, analysis, corrections), api_key=api_key)
             repairs = _read_subtopic_summaries(repaired, [record["node_id"] for record in invalid])
             for node_id, summary in repairs.items():
                 if not _has_summary_word_count(summary):
@@ -674,7 +676,8 @@ factual source terms, repair the length, and count again before responding.
 
 
 def analyze_navigation(
-    transcript: Transcript, job_id: str, view: str, api_key: Optional[str] = None
+    transcript: Transcript, job_id: str, view: str, api_key: Optional[str] = None,
+    *, prompt: str = "",
 ) -> NavigationAnalysis:
     """Analyze exactly one view; failures are returned as failed cacheable results."""
     selection = resolve_inference()
@@ -694,17 +697,17 @@ def analyze_navigation(
                 "first_segment": first, "last_segment": last,
                 "segments": source,
             }, ensure_ascii=False)
-            result = request_json(TIMELINE_PROMPT if view == "timeline" else TOPICS_PROMPT, user_prompt, api_key=api_key)
+            result = request_json(with_focus_prompt(TIMELINE_PROMPT if view == "timeline" else TOPICS_PROMPT, prompt), user_prompt, api_key=api_key)
             summaries.append(_summary(result))
             validate = _validate_timeline if view == "timeline" else _validate_topics
             nodes.extend(validate(result.get("nodes"), first, last))
         if len(chunks) > 1:
-            nodes = (_regroup_timeline if view == "timeline" else _regroup_topics)(nodes, api_key)
+            nodes = (_regroup_timeline if view == "timeline" else _regroup_topics)(nodes, api_key, prompt)
         analysis.nodes = _finalize(nodes, segments, view)
         analysis.summary = summaries[0] if len(summaries) == 1 else " ".join(node["summary"] for node in nodes if node["summary"])
         analysis.status = AnalysisStatus.COMPLETED
         if needs_subtopic_summaries(analysis):
-            analysis = summarize_subtopics(transcript, analysis, api_key=api_key)
+            analysis = summarize_subtopics(transcript, analysis, api_key=api_key, prompt=prompt)
     except Exception as exc:
         analysis.status = AnalysisStatus.FAILED
         analysis.error = str(exc)

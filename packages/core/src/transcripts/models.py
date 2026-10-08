@@ -194,6 +194,35 @@ class NavigationAnalysis:
         )
 
 
+@dataclass
+class SavedAnalysis:
+    """One named, immutable analysis version of a saved transcript."""
+
+    id: str
+    job_id: str
+    name: str
+    view: Optional[str]
+    prompt: str = ""
+    status: AnalysisStatus = AnalysisStatus.PENDING
+    summary: Optional[str] = None
+    key_points: List[str] = field(default_factory=list)
+    nodes: List[Dict[str, Any]] = field(default_factory=list)
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    error: Optional[str] = None
+    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {**vars(self), "status": self.status.value}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SavedAnalysis":
+        values = {key: value for key, value in data.items() if key in cls.__dataclass_fields__}
+        values["status"] = AnalysisStatus(data.get("status", "pending"))
+        return cls(**values)
+
+
 def derive_utterances(words: List["Word"], pause_threshold_ms: int = 1000) -> List[Utterance]:
     """
     Group words into utterances by speaker and pauses.

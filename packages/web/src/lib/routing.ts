@@ -2,7 +2,7 @@ import type { NavigationView } from '../api/client';
 
 export type AppRoute =
   | { page: 'home' }
-  | { page: 'transcript'; jobId: string; view: NavigationView }
+  | { page: 'transcript'; jobId: string; view?: NavigationView; analysisId?: string }
   | { page: 'not-found' };
 
 export function parseRoute(pathname: string, search: string): AppRoute {
@@ -14,11 +14,17 @@ export function parseRoute(pathname: string, search: string): AppRoute {
   try {
     const jobId = decodeURIComponent(match[1]);
     if (!jobId || jobId.includes('/')) return { page: 'not-found' };
-    const view = new URLSearchParams(search).get('view') === 'topics' ? 'topics' : 'timeline';
-    return { page: 'transcript', jobId, view };
+    const params = new URLSearchParams(search);
+    if (params.has('analysis')) return { page: 'transcript', jobId, analysisId: params.get('analysis')! };
+    const view = params.get('view');
+    return { page: 'transcript', jobId, ...(view === 'topics' || view === 'timeline' ? { view } : {}) };
   } catch {
     return { page: 'not-found' };
   }
+}
+
+export function analysisPath(jobId: string, analysisId?: string): string {
+  return `/jobs/${encodeURIComponent(jobId)}${analysisId !== undefined ? `?analysis=${encodeURIComponent(analysisId)}` : ''}`;
 }
 
 export function transcriptPath(jobId: string, view: NavigationView = 'timeline'): string {

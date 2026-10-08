@@ -38,11 +38,18 @@ automatically read browser cookies.
 
 ## Transcript Analysis
 
-Choose an **Analysis settings** provider and model in a completed transcript.
-The selection is remembered in this browser and applies to summaries, timeline,
-topics, subtopic summary updates, and Meaning search. Saved results show their
-provider/model; **Regenerate** replaces a saved result using a different selection.
-Switching settings alone does not trigger inference.
+Open a completed transcript and create a named analysis with a **Timeline** or
+**Topics** visualization. Each analysis saves its own summary, key points,
+visualization, focus prompt and inference provider/model. Several analyses can
+use the same transcript. The newest is selected by default; use the analysis
+selector to open earlier versions.
+
+Optional prompts refine the content while keeping the visualization format. For
+example, “Emphasize engineering tradeoffs” can refine the labels, organization
+and summaries. Timeline always covers the whole video chronologically.
+**Create another version** opens a form seeded with the saved settings; submitting
+creates another saved version and preserves earlier results.
+Switching analyses or inference settings alone does not trigger inference.
 
 - **Kimi Code**: set `KIMI_CODE_API_KEY` in the root `.env` file. Default model: `k3`.
   Access is subject to your membership's client and usage restrictions.
@@ -70,30 +77,34 @@ The Fireworks client uses the [chat completions API](https://docs.fireworks.ai/a
 keys), and each provider's `models` (`id`, `name`, `context_length`), `catalog_status`
 (`ready`, `stale`, `error`, `unconfigured`), `catalog_updated_at`, and `catalog_error`.
 `POST /api/inference/providers/refresh` forces discovery and returns the same shape.
-Analysis and navigation POSTs
-accept an optional `{"provider": "fireworks", "model": "accounts/fireworks/models/kimi-k3"}`
-body; search accepts these fields alongside `query` and `mode`. Omitted bodies
-preserve existing cache behavior. Explicitly selecting a different provider/model
-regenerates a completed analysis; an in-progress request keeps its original selection.
-Subtopic summary updates preserve the original navigation provider/model metadata.
+`GET /api/jobs/{id}/analyses` lists saved analyses newest first.
+`POST /api/jobs/{id}/analyses` accepts `name`, `view` (`timeline` or `topics`),
+optional `prompt`, `provider` and `model`. Creation returns HTTP 202 with the new
+analysis ID; read `/api/jobs/{id}/analyses/{analysis_id}` to follow its status.
+`POST /api/jobs/{id}/analyses/{analysis_id}/regenerate` creates a new version,
+inheriting saved settings unless overridden. `DELETE` on the individual analysis
+removes only that result. Reads never start inference.
+
+Existing saved summaries and navigation views are imported once as separate
+analyses, preserving their results and model metadata without model requests.
+Older summary-only results remain readable; choose a visualization to create a
+new version. The old summary/navigation endpoints and tables have been removed.
+Meaning search stays scoped to the video transcript and accepts its own inference
+selection independently of the saved analysis prompt.
 
 ## Topic Navigation
 
 The web archive is at `/` and each transcript has a shareable `/jobs/{id}` URL.
-Topics uses `/jobs/{id}?view=topics`; refreshing or using browser Back/Forward
-preserves the transcript and selected view. Vite serves these routes during
+Saved analyses use `/jobs/{id}?analysis={analysis_id}`; refreshing or using browser
+Back/Forward preserves the transcript and selected analysis. Vite serves these routes during
 development and preview. A production web server must serve `index.html` for
 frontend routes such as `/jobs/{id}`.
 
-Open a completed transcript in the web UI and choose **Create Timeline** or
-**Create Topics**. Each action runs its own analysis and waits for the view
-to finish. Results are saved independently in SQLite, so switching to an existing
-view does not make another model request. Failed analyses can be retried.
-
-Subtopics display summaries of at most 20 words using relevant terms from their transcript
-passages. For older saved views, choose **Update summaries** to refresh the
-summaries while keeping their existing hierarchy and timestamps. Subtopic tiles
-have extra vertical space, and selecting a subtopic reveals its full summary.
+Each analysis displays its selected visualization when generation finishes.
+Results are saved independently in SQLite, so switching to an existing analysis
+does not make another model request. Retrying a failed analysis creates a new
+version. Subtopics display summaries of at most 20 words using relevant terms
+from their transcript passages. Selecting a subtopic reveals its full summary.
 
 - **Timeline** shows chronological chapters and nested subtopics as horizontal
   tiles. Chapters and level 2 subtopics stay visible across the full video.
@@ -116,10 +127,8 @@ analyzed in bounded chunks; model-selected passage references are validated and
 mapped back to original word/utterance times rather than generated timestamps.
 Videos that cannot be embedded still offer timestamped links to YouTube.
 
-The API exposes `GET` and `POST /api/jobs/{id}/navigation/{timeline|topics}` and
-`POST /api/jobs/{id}/search` with `{"query": "…", "mode": "exact"}` or
-`"mode": "semantic"`. Creation returns the completed result, or HTTP 202 when
-another request is already creating that view. Reading a view never creates it.
+The API exposes `POST /api/jobs/{id}/search` with
+`{"query": "…", "mode": "exact"}` or `"mode": "semantic"`.
 `GET /api/jobs/{id}/video` serves retained videos with byte ranges for seeking.
 
 ## Data Directories

@@ -3,7 +3,7 @@ import { JobList } from './components/JobList';
 import { TranscriptView } from './components/TranscriptView';
 import { RouteLink } from './components/RouteLink';
 import { useRoute } from './hooks/useRoute';
-import { navigate, transcriptPath } from './lib/routing';
+import { analysisPath, navigate } from './lib/routing';
 
 function App() {
   const route = useRoute();
@@ -19,7 +19,8 @@ function App() {
           key={route.jobId}
           jobId={route.jobId}
           view={route.view}
-          onViewChange={(view) => navigate(transcriptPath(route.jobId, view))}
+          analysisId={route.analysisId}
+          onAnalysisChange={(analysisId) => navigate(analysisPath(route.jobId, analysisId))}
         />
       ) : route.page === 'home' ? (
         <main className="library-page animate-fade-in">

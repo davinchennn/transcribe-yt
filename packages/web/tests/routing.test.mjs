@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
-import { getRouteLocation, navigate, parseRoute, subscribeToRoute, transcriptPath } from '../src/lib/routing.ts';
+import { analysisPath, getRouteLocation, navigate, parseRoute, subscribeToRoute, transcriptPath } from '../src/lib/routing.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -85,14 +85,15 @@ test('transcript paths escape job IDs and only topics requires a view query', ()
   assert.equal(path, '/jobs/job%20%3F%26%3D%23%25%20caf%C3%A9');
   assert.equal(transcriptPath(jobId, 'timeline'), path);
   assert.equal(transcriptPath(jobId, 'topics'), `${path}?view=topics`);
-  assert.deepEqual(parseRoute(path, ''), { page: 'transcript', jobId, view: 'timeline' });
+  assert.deepEqual(parseRoute(path, ''), { page: 'transcript', jobId });
   assert.deepEqual(parseRoute(`${path}/`, '?view=topics'), { page: 'transcript', jobId, view: 'topics' });
 });
 
-test('invalid or absent views fall back to timeline and root remains the homepage', () => {
-  for (const search of ['', '?view=timeline', '?view=', '?view=unknown', '?other=topics']) {
-    assert.deepEqual(parseRoute('/jobs/a', search), { page: 'transcript', jobId: 'a', view: 'timeline' });
+test('absent or invalid views leave selection at the newest analysis and explicit legacy views remain supported', () => {
+  for (const search of ['', '?view=', '?view=unknown', '?other=topics']) {
+    assert.deepEqual(parseRoute('/jobs/a', search), { page: 'transcript', jobId: 'a' });
   }
+  assert.deepEqual(parseRoute('/jobs/a', '?view=timeline'), { page: 'transcript', jobId: 'a', view: 'timeline' });
   assert.deepEqual(parseRoute('/', '?view=topics'), { page: 'home' });
 });
 
@@ -226,5 +227,33 @@ test('route links honor caller click handlers and already-prevented events', () 
     assert.equal(event.defaultPrevented, true);
     clickLink({ href: '/jobs/a' }, { defaultPrevented: true });
     assert.equal(browser.history.length, 1);
+  });
+});
+
+
+test('analysis links escape IDs, restore the exact saved version, and take precedence over legacy views', () => {
+  const id = 'analysis ?&=#% café';
+  const path = analysisPath('job ?', id);
+  const url = new URL(path, 'https://app.example');
+  assert.equal(path, '/jobs/job%20%3F?analysis=analysis%20%3F%26%3D%23%25%20caf%C3%A9');
+  assert.deepEqual(parseRoute(url.pathname, url.search), { page: 'transcript', jobId: 'job ?', analysisId: id });
+  assert.deepEqual(parseRoute('/jobs/a', '?analysis=saved&view=topics'), { page: 'transcript', jobId: 'a', analysisId: 'saved' });
+  assert.deepEqual(parseRoute('/jobs/a', '?analysis='), { page: 'transcript', jobId: 'a', analysisId: '' });
+  assert.equal(analysisPath('a'), '/jobs/a');
+});
+
+test('browser Back and Forward restore selected saved analyses within one video', () => {
+  withWindow('https://app.example/jobs/a', (browser) => {
+    const locations = [];
+    const cleanup = subscribeToRoute(() => locations.push(getRouteLocation()));
+    try {
+      navigate(analysisPath('a', 'first'));
+      navigate(analysisPath('a', 'second'));
+      browser.history.back();
+      assert.deepEqual(parseRoute(browser.location.pathname, browser.location.search), { page: 'transcript', jobId: 'a', analysisId: 'first' });
+      browser.history.forward();
+      assert.deepEqual(parseRoute(browser.location.pathname, browser.location.search), { page: 'transcript', jobId: 'a', analysisId: 'second' });
+      assert.deepEqual(locations, ['/jobs/a?analysis=first', '/jobs/a?analysis=second', '/jobs/a?analysis=first', '/jobs/a?analysis=second']);
+    } finally { cleanup(); }
   });
 });

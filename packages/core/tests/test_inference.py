@@ -3,7 +3,6 @@
 import io
 import json
 import os
-import sqlite3
 import tempfile
 import unittest
 import urllib.error
@@ -14,7 +13,7 @@ from unittest.mock import patch
 from transcripts.analyzer import analyze_transcript
 from transcripts.inference import InferenceSelection, inference_options, inference_scope, resolve_inference
 from transcripts.llm import LLMError, request_json
-from transcripts.models import Analysis, AnalysisStatus, NavigationAnalysis
+from transcripts.models import AnalysisStatus, Stage, Transcript, Word
 from transcripts.storage.sqlite import SQLiteStorage
 
 
@@ -101,28 +100,23 @@ class InferenceTests(unittest.TestCase):
                 raise RuntimeError('failed')
         self.assertEqual(resolve_inference(), choices[0])
 
-    def test_legacy_schema_migration_and_model_cache_reservation(self):
+    def test_saved_versions_preserve_independent_inference_selections(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'test.db'
             storage = SQLiteStorage(str(path))
             job = storage.create_job('https://youtube.com/watch?v=abcdefghijk')
-            storage.save_analysis(Analysis(job.id, AnalysisStatus.COMPLETED, model='k3', provider='kimi'))
-            storage.save_navigation(NavigationAnalysis(job.id, 'timeline', AnalysisStatus.COMPLETED, model='k3', provider='kimi'))
-            # Recreate the pre-provider schema, then reopen using normal migration.
-            with sqlite3.connect(path) as conn:
-                conn.execute('ALTER TABLE analyses DROP COLUMN provider')
-                conn.execute('ALTER TABLE navigation_analyses DROP COLUMN provider')
+            storage.set_stage(job.id, Stage.COMPLETED)
+            storage.save_transcript(job.id, Transcript(job.url, 'Video', transcript_text='Source', words=[Word('Source', 0, 100)]))
+            first = storage.create_saved_analysis(job.id, 'Kimi analysis', 'timeline', provider='kimi', model='k3')
+            second = storage.create_saved_analysis(job.id, 'Fireworks analysis', 'timeline', provider='fireworks', model='fw-model')
+            self.assertTrue(storage.claim_saved_analysis(job.id, first.id))
+            self.assertTrue(storage.claim_saved_analysis(job.id, second.id))
+            source = storage.get_transcript(job.id)
+            for result in (first, second):
+                result.status = AnalysisStatus.COMPLETED
+                self.assertTrue(storage.finish_saved_analysis(result, source))
             storage = SQLiteStorage(str(path))
-            self.assertEqual(storage.get_analysis(job.id).provider, 'kimi')
-            self.assertEqual(storage.get_navigation(job.id, 'timeline').provider, 'kimi')
-            self.assertFalse(storage.claim_navigation(job.id, 'timeline', 'kimi', 'k3'))
-            self.assertTrue(storage.claim_navigation(job.id, 'timeline', 'fireworks', 'fw-model'))
-            reserved = storage.get_navigation(job.id, 'timeline')
-            self.assertEqual((reserved.provider, reserved.model), ('fireworks', 'fw-model'))
-            self.assertFalse(storage.claim_navigation(job.id, 'timeline', 'kimi', 'k3'))
-            storage.save_navigation(NavigationAnalysis(job.id, 'timeline', AnalysisStatus.COMPLETED, model='fw-model', provider='fireworks'))
-            storage.save_analysis(Analysis(job.id, AnalysisStatus.COMPLETED, model='fw-model', provider='fireworks'))
-            self.assertEqual(storage.get_analysis(job.id).provider, 'fireworks')
-            self.assertEqual(storage.get_navigation(job.id, 'timeline').provider, 'fireworks')
-            self.assertFalse(storage.claim_navigation(job.id, 'timeline', 'fireworks', 'fw-model'))
-            self.assertIsNone(storage.get_navigation(job.id, 'topics'))
+            records = storage.list_saved_analyses(job.id)
+            self.assertEqual([(row.provider, row.model) for row in records], [('fireworks', 'fw-model'), ('kimi', 'k3')])
+            self.assertFalse(storage.claim_saved_analysis(job.id, first.id))
+            self.assertFalse(storage.claim_saved_analysis(job.id, second.id))

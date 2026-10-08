@@ -1,6 +1,6 @@
 """Pydantic schemas for API requests and responses."""
 
-from typing import Dict, List, Literal, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -61,19 +61,6 @@ class TranscriptResponse(BaseModel):
     utterances: List[UtteranceResponse] = []
 
 
-class AnalysisResponse(BaseModel):
-    """Analysis response."""
-    job_id: str
-    status: str
-    summary: Optional[str] = None
-    key_points: List[str] = []
-    model: Optional[str] = None
-    provider: Optional[str] = None
-    error: Optional[str] = None
-    created_at: str
-    updated_at: str
-
-
 class PassageResponse(BaseModel):
     """A passage grounded in source utterances, with millisecond timings."""
     id: str
@@ -99,23 +86,41 @@ class NavigationNodeResponse(BaseModel):
     occurrences: List[PassageResponse] = Field(default_factory=list)
 
 
-class NavigationResponse(BaseModel):
-    """An independently generated and cached navigation view."""
-    job_id: str
+class InferenceRequest(BaseModel):
+    provider: Optional[Literal["kimi", "fireworks"]] = None
+    model: Optional[str] = Field(default=None, min_length=1, max_length=300)
+
+
+class SavedAnalysisCreate(InferenceRequest):
+    """Create a named analysis without replacing another saved result."""
+    name: str = Field(min_length=1, max_length=200)
     view: Literal["timeline", "topics"]
+    prompt: str = Field(default="", max_length=10000)
+
+
+class SavedAnalysisRegenerate(InferenceRequest):
+    """Optional settings for a new version of an existing analysis."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    view: Optional[Literal["timeline", "topics"]] = None
+    prompt: Optional[str] = Field(default=None, max_length=10000)
+
+
+class SavedAnalysisResponse(BaseModel):
+    """A named, independently saved summary and visualization."""
+    id: str
+    job_id: str
+    name: str
+    view: Optional[Literal["timeline", "topics"]] = None
+    prompt: str = ""
     status: str
     summary: Optional[str] = None
+    key_points: List[str] = Field(default_factory=list)
     nodes: List[NavigationNodeResponse] = Field(default_factory=list)
     model: Optional[str] = None
     provider: Optional[str] = None
     error: Optional[str] = None
     created_at: str
     updated_at: str
-
-
-class InferenceRequest(BaseModel):
-    provider: Optional[Literal["kimi", "fireworks"]] = None
-    model: Optional[str] = Field(default=None, min_length=1, max_length=300)
 
 
 class InferenceModelResponse(BaseModel):
@@ -157,8 +162,7 @@ class JobDetailResponse(BaseModel):
     """Job with transcript details."""
     job: JobResponse
     transcript: Optional[TranscriptResponse] = None
-    analysis: Optional[AnalysisResponse] = None
-    navigation: Dict[str, Optional[NavigationResponse]] = Field(default_factory=dict)
+    analyses: List[SavedAnalysisResponse] = Field(default_factory=list)
 
 
 class JobListResponse(BaseModel):

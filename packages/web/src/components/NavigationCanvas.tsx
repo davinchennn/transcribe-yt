@@ -1,9 +1,9 @@
 import type { CSSProperties } from 'react';
-import type { NavigationAnalysis, NavigationNode, Passage } from '../api/client';
+import type { NavigationNode, NavigationView, Passage, SavedAnalysis } from '../api/client';
 import { formatTime, segmentPosition } from '../lib/navigation';
 
 interface Props {
-  analysis: NavigationAnalysis;
+  analysis: Pick<SavedAnalysis, 'summary' | 'nodes'> & { view: NavigationView };
   duration: number;
   currentTime: number;
   selected: Passage | null;

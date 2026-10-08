@@ -1,22 +1,17 @@
 """API routes for job management."""
 
-import asyncio
 import logging
 from pathlib import Path
-from typing import Literal, Optional
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
+from typing import List, Optional
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from transcripts.state import StateManager
 from transcripts.processor import TranscriptProcessor
-from transcripts.models import Stage, Analysis, AnalysisStatus, NavigationAnalysis
-from transcripts.analyzer import analyze_transcript
-from transcripts.navigation import (
-    analyze_navigation,
-    needs_subtopic_summaries,
-    summarize_subtopics,
-)
+from transcripts.models import Stage
+from transcripts.navigation import source_segments
+from transcripts.analyses import AnalysisConflictError, run_saved_analysis
 from transcripts.search import search_transcript
 from transcripts.llm import LLMError
 from transcripts.inference import (
@@ -26,7 +21,6 @@ from transcripts.sources import parse_video_source
 from transcripts.storage.base import extract_video_id
 
 from api.schemas import (
-    AnalysisResponse,
     InferenceRequest,
     InferenceOptionsResponse,
     JobCreate,
@@ -37,9 +31,11 @@ from api.schemas import (
     WordResponse,
     UtteranceResponse,
     HealthResponse,
-    NavigationResponse,
     PassageSearchRequest,
     PassageSearchResponse,
+    SavedAnalysisCreate,
+    SavedAnalysisRegenerate,
+    SavedAnalysisResponse,
 )
 
 router = APIRouter(prefix="/api")
@@ -48,7 +44,6 @@ logger = logging.getLogger(__name__)
 # Shared state manager instance
 _state_manager: Optional[StateManager] = None
 VIDEO_DIRECTORY = Path("downloads/videos")
-_summary_updates = {}
 
 
 def get_state_manager() -> StateManager:
@@ -214,34 +209,11 @@ async def get_job(job_id: str):
                     ],
                 )
 
-    # Include analysis if available
-    analysis_response = None
-    if hasattr(storage, 'get_analysis'):
-        analysis = storage.get_analysis(job_id)
-        if analysis:
-            analysis_response = AnalysisResponse(
-                job_id=analysis.job_id,
-                status=analysis.status.value,
-                summary=analysis.summary,
-                key_points=analysis.key_points,
-                model=analysis.model,
-                provider=analysis.provider,
-                error=analysis.error,
-                created_at=analysis.created_at,
-                updated_at=analysis.updated_at,
-            )
-
-    navigation = {}
-    if hasattr(storage, 'get_navigation'):
-        for view in ("timeline", "topics"):
-            result = storage.get_navigation(job_id, view)
-            navigation[view] = navigation_to_response(result) if result else None
-
     return JobDetailResponse(
         job=job_to_response(job),
         transcript=transcript_response,
-        analysis=analysis_response,
-        navigation=navigation,
+        analyses=[saved_analysis_to_response(result) for result in storage.list_saved_analyses(job_id)]
+        if hasattr(storage, "list_saved_analyses") else [],
     )
 
 
@@ -294,14 +266,14 @@ async def delete_job(job_id: str):
     if not job:
         raise HTTPException(404, "Job not found")
 
-    # Delete transcript and analysis first
+    # Delete transcript and saved analyses first
     storage = state._storage
     if hasattr(storage, 'delete_transcript'):
         storage.delete_transcript(job_id)
-    if hasattr(storage, 'delete_analysis'):
-        storage.delete_analysis(job_id)
-    if hasattr(storage, 'delete_navigation'):
-        storage.delete_navigation(job_id)
+
+    if hasattr(storage, 'list_saved_analyses') and hasattr(storage, 'delete_saved_analysis'):
+        for analysis in storage.list_saved_analyses(job_id):
+            storage.delete_saved_analysis(job_id, analysis.id)
 
     # Delete the specific job
     state.delete_job(job_id)
@@ -364,107 +336,6 @@ def run_selected(selection: InferenceSelection, function, *args):
         return function(*args)
 
 
-@router.post("/jobs/{job_id}/analyze", response_model=AnalysisResponse)
-async def analyze_job(
-    job_id: str,
-    background_tasks: BackgroundTasks,
-    body: Optional[InferenceRequest] = None,
-):
-    """Trigger analysis for a completed job."""
-    state = get_state_manager()
-    job = state.get_job(job_id)
-
-    if not job:
-        raise HTTPException(404, "Job not found")
-
-    if job.stage != Stage.COMPLETED:
-        raise HTTPException(400, "Only completed jobs can be analyzed")
-
-    storage = state._storage
-    if not hasattr(storage, 'get_analysis'):
-        raise HTTPException(500, "Storage backend does not support analysis")
-
-    selection = selected_inference(body)
-    # Check for existing analysis
-    existing = storage.get_analysis(job_id)
-    matches_selection = existing and (
-        (existing.provider or "kimi", existing.model) == (selection.provider, selection.model)
-    )
-    if existing and (
-        existing.status in (AnalysisStatus.PENDING, AnalysisStatus.PROCESSING)
-        or (existing.status == AnalysisStatus.COMPLETED and (body is None or matches_selection))
-    ):
-        return AnalysisResponse(
-            job_id=existing.job_id,
-            status=existing.status.value,
-            summary=existing.summary,
-            key_points=existing.key_points,
-            model=existing.model,
-            provider=existing.provider,
-            error=existing.error,
-            created_at=existing.created_at,
-            updated_at=existing.updated_at,
-        )
-
-    require_inference_key(selection)
-    # Create pending analysis
-    from datetime import datetime
-    now = datetime.utcnow().isoformat()
-    analysis = Analysis(
-        job_id=job_id,
-        status=AnalysisStatus.PENDING,
-        provider=selection.provider, model=selection.model,
-        created_at=now,
-        updated_at=now,
-    )
-    storage.save_analysis(analysis)
-
-    # Start background analysis
-    background_tasks.add_task(run_analysis, job_id, selection)
-
-    return AnalysisResponse(
-        job_id=analysis.job_id,
-        status=analysis.status.value,
-        summary=analysis.summary,
-        key_points=analysis.key_points,
-        model=analysis.model,
-        provider=analysis.provider,
-        error=analysis.error,
-        created_at=analysis.created_at,
-        updated_at=analysis.updated_at,
-    )
-
-
-def run_analysis(job_id: str, selection: Optional[InferenceSelection] = None):
-    """Background task to run transcript analysis."""
-    state = get_state_manager()
-    storage = state._storage
-
-    # Get transcript text
-    transcript = storage.get_transcript(job_id) if hasattr(storage, 'get_transcript') else None
-    if not transcript:
-        from datetime import datetime
-        analysis = Analysis(
-            job_id=job_id,
-            status=AnalysisStatus.FAILED,
-            error="No transcript found for this job",
-            provider=selection.provider if selection else None,
-            model=selection.model if selection else None,
-            created_at=datetime.utcnow().isoformat(),
-            updated_at=datetime.utcnow().isoformat(),
-        )
-        storage.save_analysis(analysis)
-        return
-
-    # Run analysis
-    analysis = run_selected(selection or resolve_inference(), analyze_transcript, transcript.transcript_text, job_id)
-    storage.save_analysis(analysis)
-
-
-def navigation_to_response(analysis: NavigationAnalysis) -> NavigationResponse:
-    return NavigationResponse(**analysis.to_dict())
-
-
 def completed_transcript(job_id: str):
     """Require an existing, completed job with a stored transcript."""
     state = get_state_manager()
@@ -472,7 +343,7 @@ def completed_transcript(job_id: str):
     if not job:
         raise HTTPException(404, "Job not found")
     if job.stage != Stage.COMPLETED:
-        raise HTTPException(400, "Only completed transcripts support navigation and search")
+        raise HTTPException(400, "Only completed transcripts support analysis and search")
     storage = state._storage
     if not hasattr(storage, "get_transcript"):
         raise HTTPException(400, "This storage backend does not support transcripts")
@@ -482,144 +353,112 @@ def completed_transcript(job_id: str):
     return state, storage, transcript
 
 
-@router.get("/jobs/{job_id}/navigation/{view}", response_model=Optional[NavigationResponse])
-async def get_navigation(job_id: str, view: Literal["timeline", "topics"]):
-    """Read a saved view without starting analysis."""
+def saved_analysis_to_response(analysis) -> SavedAnalysisResponse:
+    return SavedAnalysisResponse(**analysis.to_dict())
+
+
+def saved_analysis_storage(job_id: str):
+    """Read saved versions without requiring a generation-capable transcript."""
     state = get_state_manager()
     if not state.get_job(job_id):
         raise HTTPException(404, "Job not found")
     storage = state._storage
-    if not hasattr(storage, "get_navigation"):
-        raise HTTPException(400, "This storage backend does not support navigation")
-    analysis = storage.get_navigation(job_id, view)
-    return navigation_to_response(analysis) if analysis else None
+    if not all(hasattr(storage, method) for method in (
+        "create_saved_analysis", "list_saved_analyses", "get_saved_analysis", "delete_saved_analysis",
+    )):
+        raise HTTPException(400, "This storage backend does not support saved analyses")
+    return storage
 
 
-@router.post("/jobs/{job_id}/navigation/{view}", response_model=NavigationResponse)
-async def create_navigation(
-    job_id: str, view: Literal["timeline", "topics"], response: Response,
-    body: Optional[InferenceRequest] = None,
-):
-    """Await creation of exactly the selected view while keeping the API responsive."""
-    state, storage, transcript = completed_transcript(job_id)
-    if not all(hasattr(storage, name) for name in ("get_navigation", "save_navigation", "claim_navigation")):
-        raise HTTPException(400, "This storage backend does not support navigation")
-
-    selection = selected_inference(body)
-    existing = storage.get_navigation(job_id, view)
-    changed_selection = existing and (
-        (existing.provider or "kimi", existing.model) != (selection.provider, selection.model)
-    )
-    if (
-        not existing or existing.status == AnalysisStatus.FAILED
-        or (body is not None and existing.status == AnalysisStatus.COMPLETED and changed_selection)
-    ):
-        require_inference_key(selection)
-    if not storage.claim_navigation(
-        job_id, view, selection.provider, selection.model, replace_completed=body is not None,
-    ):
-        existing = storage.get_navigation(job_id, view)
-        if not existing:
-            raise HTTPException(409, "Navigation changed while it was being requested; retry")
-        if existing.status in (AnalysisStatus.PENDING, AnalysisStatus.PROCESSING):
-            response.status_code = 202
-        return navigation_to_response(existing)
-
-    reservation = storage.get_navigation(job_id, view)
-    finished = asyncio.Event()
-    heartbeat = asyncio.create_task(keep_navigation_alive(storage, job_id, view, finished))
-    try:
-        try:
-            analysis = await run_in_threadpool(run_selected, selection, analyze_navigation, transcript, job_id, view)
-        except Exception:
-            # Unexpected failures must release the reservation so retry remains possible.
-            logger.exception("Navigation creation failed for %s/%s", job_id, view)
-            analysis = NavigationAnalysis(
-                job_id=job_id, view=view, status=AnalysisStatus.FAILED,
-                error="Navigation creation failed. Please retry.",
-                provider=selection.provider, model=selection.model,
-            )
-    finally:
-        finished.set()
-        await heartbeat
-    if not state.get_job(job_id):
-        storage.delete_navigation(job_id)
-        raise HTTPException(404, "Job was deleted while navigation was being created")
-    current_transcript = storage.get_transcript(job_id)
-    if (
-        not current_transcript
-        or current_transcript.transcript_text != transcript.transcript_text
-        or current_transcript.words != transcript.words
-        or current_transcript.utterances != transcript.utterances
-    ):
-        storage.delete_navigation(job_id)
-        raise HTTPException(409, "Transcript changed while navigation was being created. Create this view again.")
-    if reservation:
-        analysis.created_at = reservation.created_at
-    storage.save_navigation(analysis)
-    return navigation_to_response(analysis)
+def require_saved_analysis(storage, job_id: str, analysis_id: str):
+    analysis = storage.get_saved_analysis(job_id, analysis_id)
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+    return analysis
 
 
-async def keep_navigation_alive(storage, job_id: str, view: str, finished: asyncio.Event):
-    """Keep a long multi-call analysis reserved without blocking other requests."""
-    if not hasattr(storage, "lease_navigation"):
-        return
-    while not finished.is_set():
-        try:
-            await asyncio.wait_for(finished.wait(), timeout=30)
-        except asyncio.TimeoutError:
-            try:
-                if not storage.lease_navigation(job_id, view):
-                    return
-            except Exception:
-                logger.exception("Could not refresh navigation reservation for %s/%s", job_id, view)
-                return
-
-
-async def update_subtopic_summaries(storage, transcript, analysis, selection):
-    """Rewrite summaries while preserving a saved view and its source passages."""
-    try:
-        updated = await run_in_threadpool(run_selected, selection, summarize_subtopics, transcript, analysis)
-    except (ValueError, LLMError) as exc:
-        raise HTTPException(502, str(exc)) from exc
-
-    if not storage.save_navigation_if_current(updated, analysis, transcript):
-        raise HTTPException(409, "Navigation or transcript changed while updating summaries; try again")
-    return navigation_to_response(updated)
-
-
-@router.post("/jobs/{job_id}/navigation/{view}/summaries", response_model=NavigationResponse)
-async def refresh_subtopic_summaries(
-    job_id: str, view: Literal["timeline", "topics"], body: Optional[InferenceRequest] = None,
-):
-    """Update existing subtopic summaries without recreating topic navigation."""
+def start_saved_analysis(job_id: str, body: SavedAnalysisCreate, background_tasks: BackgroundTasks):
+    """Validate before reserving a new version or dispatching generation."""
     _, storage, transcript = completed_transcript(job_id)
-    if not all(hasattr(storage, method) for method in ("get_navigation", "save_navigation_if_current")):
-        raise HTTPException(400, "This storage backend does not support navigation")
-    analysis = storage.get_navigation(job_id, view)
-    if not analysis or analysis.status != AnalysisStatus.COMPLETED:
-        raise HTTPException(400, "Create this view before updating its subtopic summaries")
-    if not needs_subtopic_summaries(analysis):
-        return navigation_to_response(analysis)
-
+    saved_analysis_storage(job_id)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Enter an analysis name")
+    try:
+        source_segments(transcript)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     selection = selected_inference(body)
     require_inference_key(selection)
-    # Concurrent requests share the same work instead of making duplicate calls.
-    key = (job_id, view)
-    task = _summary_updates.get(key)
-    if task is None:
-        task = asyncio.create_task(update_subtopic_summaries(storage, transcript, analysis, selection))
-        _summary_updates[key] = task
+    try:
+        analysis = storage.create_saved_analysis(
+            job_id, name, body.view, prompt=body.prompt.strip(),
+            provider=selection.provider, model=selection.model,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    background_tasks.add_task(generate_saved_analysis, storage, analysis, transcript)
+    return saved_analysis_to_response(analysis)
 
-        def release(completed):
-            if _summary_updates.get(key) is completed:
-                _summary_updates.pop(key, None)
-            # Retrieve failures even when the client disconnected during the call.
-            if not completed.cancelled():
-                completed.exception()
 
-        task.add_done_callback(release)
-    return await asyncio.shield(task)
+def generate_saved_analysis(storage, analysis, transcript):
+    """Run a reserved version; deletion or a replaced transcript cancels saving."""
+    try:
+        run_saved_analysis(storage, analysis, transcript)
+    except AnalysisConflictError:
+        logger.info("Analysis %s for %s changed before generation finished", analysis.id, analysis.job_id)
+
+
+@router.get("/jobs/{job_id}/analyses", response_model=List[SavedAnalysisResponse])
+async def list_saved_analyses(job_id: str):
+    storage = saved_analysis_storage(job_id)
+    return [saved_analysis_to_response(analysis) for analysis in storage.list_saved_analyses(job_id)]
+
+
+@router.post("/jobs/{job_id}/analyses", response_model=SavedAnalysisResponse, status_code=202)
+async def create_saved_analysis(job_id: str, body: SavedAnalysisCreate, background_tasks: BackgroundTasks):
+    """Start an independent version, including when its settings match an older one."""
+    return start_saved_analysis(job_id, body, background_tasks)
+
+
+@router.get("/jobs/{job_id}/analyses/{analysis_id}", response_model=SavedAnalysisResponse)
+async def get_saved_analysis(job_id: str, analysis_id: str):
+    storage = saved_analysis_storage(job_id)
+    return saved_analysis_to_response(require_saved_analysis(storage, job_id, analysis_id))
+
+
+@router.delete("/jobs/{job_id}/analyses/{analysis_id}")
+async def delete_saved_analysis(job_id: str, analysis_id: str):
+    storage = saved_analysis_storage(job_id)
+    require_saved_analysis(storage, job_id, analysis_id)
+    storage.delete_saved_analysis(job_id, analysis_id)
+    return {"deleted": True}
+
+
+@router.post(
+    "/jobs/{job_id}/analyses/{analysis_id}/regenerate",
+    response_model=SavedAnalysisResponse, status_code=202,
+)
+async def regenerate_saved_analysis(
+    job_id: str, analysis_id: str, background_tasks: BackgroundTasks,
+    body: Optional[SavedAnalysisRegenerate] = None,
+):
+    """Create a new version using inherited settings plus explicit changes."""
+    storage = saved_analysis_storage(job_id)
+    previous = require_saved_analysis(storage, job_id, analysis_id)
+    if not previous.view and (body is None or body.view is None):
+        raise HTTPException(400, "Choose Timeline or Topics to regenerate this legacy summary")
+    provider = body.provider if body and body.provider is not None else previous.provider
+    model = body.model if body and body.model is not None else (
+        previous.model if not body or body.provider is None or body.provider == previous.provider else None
+    )
+    settings = SavedAnalysisCreate(
+        name=body.name if body and body.name is not None else previous.name,
+        view=body.view if body and body.view is not None else previous.view,
+        prompt=body.prompt if body and body.prompt is not None else previous.prompt,
+        provider=provider, model=model,
+    )
+    return start_saved_analysis(job_id, settings, background_tasks)
 
 
 @router.post("/jobs/{job_id}/search", response_model=PassageSearchResponse)

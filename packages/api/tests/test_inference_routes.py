@@ -1,4 +1,4 @@
-"""Inference selection crosses API/thread boundaries and respects saved caches."""
+"""Inference selection crosses API/thread boundaries for independent versions."""
 
 import asyncio
 import json
@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from api import routes
 from api.main import app
 from transcripts.inference import resolve_inference
-from transcripts.models import AnalysisStatus, NavigationAnalysis, Stage, Transcript, Word
+from transcripts.models import Analysis, AnalysisStatus, NavigationAnalysis, Stage, Transcript, Word
 from transcripts.state import StateManager
 from transcripts.storage.sqlite import SQLiteStorage
 
@@ -69,13 +69,11 @@ class InferenceRouteTests(unittest.TestCase):
 
     def test_refresh_forces_discovery_without_starting_analysis(self):
         with patch.object(routes, 'inference_options', return_value=catalog_options()) as catalog, \
-                patch.object(routes, 'analyze_navigation') as navigation, \
-                patch.object(routes, 'analyze_transcript') as summary:
+                patch.object(routes, 'run_saved_analysis') as generate:
             response = self.client.post('/api/inference/providers/refresh')
         self.assertEqual(response.status_code, 200)
         catalog.assert_called_once_with(force_refresh=True)
-        navigation.assert_not_called()
-        summary.assert_not_called()
+        generate.assert_not_called()
 
     def test_stale_catalog_is_returned_with_models_and_error(self):
         options = catalog_options()
@@ -93,40 +91,70 @@ class InferenceRouteTests(unittest.TestCase):
             for method, path in [('get', '/api/inference/providers'), ('post', '/api/inference/providers/refresh')]:
                 self.assertEqual(getattr(self.client, method)(path).status_code, 400)
 
-    def test_navigation_changes_model_only_on_explicit_request(self):
-        def analyze(transcript, job_id, view):
+    def test_saved_versions_use_selected_inference_for_summary_and_visualization(self):
+        selections = []
+
+        def summarize(transcript, job_id, **settings):
             selection = resolve_inference()
+            selections.append(('summary', selection.provider, selection.model, settings['prompt']))
+            return Analysis(job_id, AnalysisStatus.COMPLETED, summary='Summary', key_points=['Point'],
+                            model=selection.model, provider=selection.provider)
+
+        def visualize(transcript, job_id, view, **settings):
+            selection = resolve_inference()
+            selections.append(('visualization', selection.provider, selection.model, settings['prompt']))
             return NavigationAnalysis(job_id, view, AnalysisStatus.COMPLETED,
                                       model=selection.model, provider=selection.provider)
-        url = f'/api/jobs/{JOB_ID}/navigation/timeline'
-        with patch.object(routes, 'analyze_navigation', side_effect=analyze) as request:
-            first = self.client.post(url, json={'provider': 'fireworks', 'model': 'model-a'})
+        url = f'/api/jobs/{JOB_ID}/analyses'
+        with patch('transcripts.analyses.analyze_transcript', side_effect=summarize), \
+                patch('transcripts.analyses.analyze_navigation', side_effect=visualize):
+            first = self.client.post(url, json={
+                'name': 'Cost focus', 'view': 'timeline', 'prompt': 'Emphasize costs',
+                'provider': 'fireworks', 'model': 'model-a',
+            })
+            self.assertEqual(first.status_code, 202, first.text)
             self.assertEqual(first.json()['provider'], 'fireworks')
             self.assertEqual(first.json()['model'], 'model-a')
-            cached = self.client.post(url, json={'provider': 'fireworks', 'model': 'model-a'})
-            self.assertEqual(cached.json(), first.json())
-            self.assertEqual(self.client.post(url).json(), first.json())
-            second = self.client.post(url, json={'provider': 'fireworks', 'model': 'model-b'})
+            first_id = first.json()['id']
+            self.assertEqual(self.client.get(f'{url}/{first_id}').json()['status'], 'completed')
+            self.assertEqual(len(selections), 2)
+            second = self.client.post(f'{url}/{first_id}/regenerate', json={'model': 'model-b'})
+            self.assertEqual(second.status_code, 202, second.text)
             self.assertEqual(second.json()['model'], 'model-b')
-            self.assertEqual(request.call_count, 2)
-        self.assertIsNone(self.storage.get_navigation(JOB_ID, 'topics'))
+            self.assertNotEqual(second.json()['id'], first_id)
+        self.assertEqual(selections, [
+            ('summary', 'fireworks', 'model-a', 'Emphasize costs'),
+            ('visualization', 'fireworks', 'model-a', 'Emphasize costs'),
+            ('summary', 'fireworks', 'model-b', 'Emphasize costs'),
+            ('visualization', 'fireworks', 'model-b', 'Emphasize costs'),
+        ])
+        self.assertEqual(self.storage.get_saved_analysis(JOB_ID, first_id).model, 'model-a')
 
-    def test_summary_routes_selected_model_and_reuses_cache(self):
+    def test_summary_requests_route_selected_key_and_regeneration_preserves_results(self):
         response = {'choices': [{'message': {'content': '{"summary":"Summary","key_points":["Point"]}'}}]}
-        url = f'/api/jobs/{JOB_ID}/analyze'
-        with patch('transcripts.llm.urllib.request.urlopen') as request:
+        url = f'/api/jobs/{JOB_ID}/analyses'
+        navigation = NavigationAnalysis(JOB_ID, 'timeline', AnalysisStatus.COMPLETED)
+        with patch('transcripts.llm.urllib.request.urlopen') as request, \
+                patch('transcripts.analyses.analyze_navigation', return_value=navigation):
             request.return_value.__enter__.return_value.read.return_value = json.dumps(response).encode()
-            first = self.client.post(url, json={'provider': 'fireworks', 'model': 'model-a'})
-            self.assertEqual(first.status_code, 200)
+            first = self.client.post(url, json={
+                'name': 'Example', 'view': 'timeline', 'provider': 'fireworks', 'model': 'model-a',
+            })
+            self.assertEqual(first.status_code, 202, first.text)
             self.assertEqual(first.json()['model'], 'model-a')
             sent = request.call_args.args[0]
             self.assertEqual(sent.get_header('Authorization'), 'Bearer fw-key')
-            self.client.post(url, json={'provider': 'fireworks', 'model': 'model-a'})
+            first_id = first.json()['id']
+            self.client.get(f'{url}/{first_id}')
             self.assertEqual(request.call_count, 1)
-            self.client.post(url, json={'provider': 'kimi', 'model': 'k3'})
+            second = self.client.post(f'{url}/{first_id}/regenerate', json={'provider': 'kimi', 'model': 'k3'})
+            self.assertEqual(second.status_code, 202, second.text)
             self.assertEqual(request.call_count, 2)
-        saved = self.storage.get_analysis(JOB_ID)
+            sent = request.call_args.args[0]
+            self.assertEqual(sent.get_header('Authorization'), 'Bearer kimi-key')
+        saved = self.storage.get_saved_analysis(JOB_ID, second.json()['id'])
         self.assertEqual((saved.provider, saved.model), ('kimi', 'k3'))
+        self.assertEqual(self.storage.get_saved_analysis(JOB_ID, first_id).provider, 'fireworks')
 
     def test_search_uses_request_selection_and_exact_search_needs_no_key(self):
         selections = []
@@ -144,12 +172,13 @@ class InferenceRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_bad_provider_model_and_missing_key_make_no_calls(self):
-        url = f'/api/jobs/{JOB_ID}/navigation/topics'
-        with patch.object(routes, 'analyze_navigation') as analyze:
-            self.assertEqual(self.client.post(url, json={'provider': 'other'}).status_code, 422)
-            self.assertEqual(self.client.post(url, json={'model': '  '}).status_code, 400)
+        url = f'/api/jobs/{JOB_ID}/analyses'
+        settings = {'name': 'Example', 'view': 'topics'}
+        with patch.object(routes, 'run_saved_analysis') as analyze:
+            self.assertEqual(self.client.post(url, json={**settings, 'provider': 'other'}).status_code, 422)
+            self.assertEqual(self.client.post(url, json={**settings, 'model': '  '}).status_code, 400)
             with patch.dict(os.environ, {}, clear=True):
-                response = self.client.post(url, json={'provider': 'fireworks'})
+                response = self.client.post(url, json={**settings, 'provider': 'fireworks'})
                 self.assertEqual(response.status_code, 400)
                 self.assertIn('FIREWORKS_API_KEY', response.text)
             analyze.assert_not_called()

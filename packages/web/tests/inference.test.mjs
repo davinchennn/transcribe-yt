@@ -53,9 +53,8 @@ test('all inference actions send the selected provider and model while reads sta
   };
   try {
     const selection = { provider: 'fireworks', model: 'accounts/fireworks/models/ember-1' };
-    await api.analyzeJob('job', selection);
-    await api.createNavigation('job', 'topics', selection);
-    await api.updateNavigationSummaries('job', 'topics', selection);
+    await api.createAnalysis('job', { name: 'Topics', view: 'topics', prompt: 'Explain tradeoffs', ...selection });
+    await api.regenerateAnalysis('job', 'saved', selection);
     await api.searchTranscript('job', 'idea', 'semantic', selection);
     for (const { options } of calls) {
       const body = JSON.parse(options.body);
@@ -63,9 +62,13 @@ test('all inference actions send the selected provider and model while reads sta
       assert.equal(body.provider, selection.provider);
       assert.equal(body.model, selection.model);
     }
-    assert.equal(JSON.parse(calls[3].options.body).mode, 'semantic');
-    await api.getNavigation('job', 'topics');
+    assert.equal(JSON.parse(calls[2].options.body).mode, 'semantic');
+    await api.listAnalyses('job');
+    await api.getSavedAnalysis('job', 'saved');
     await api.getInferenceProviders();
+    assert.equal(calls[3].url, '/api/jobs/job/analyses');
+    assert.equal(calls[3].options.body, undefined);
+    assert.equal(calls[4].url, '/api/jobs/job/analyses/saved');
     assert.equal(calls[4].options.body, undefined);
     assert.equal(calls[5].url, '/api/inference/providers');
   } finally { globalThis.fetch = original; }

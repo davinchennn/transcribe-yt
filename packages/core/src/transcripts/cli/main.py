@@ -45,6 +45,15 @@ def main() -> None:
     if sys.argv[1:2] == ["show"]:
         _show_main(sys.argv[2:])
         return
+    if sys.argv[1:2] == ["analyze"]:
+        _analyze_main(sys.argv[2:])
+        return
+    if sys.argv[1:2] == ["analyses"]:
+        _analyses_main(sys.argv[2:])
+        return
+    if sys.argv[1:2] == ["analysis"]:
+        _analysis_main(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser(
         description="Download YouTube or X/Twitter videos, extract audio, and generate transcripts using Deepgram (or AssemblyAI)",
         epilog="List saved video data with: transcribe list --help",
@@ -351,20 +360,138 @@ def _list_main(arguments: List[str]) -> None:
     if not inventory["jobs"]:
         print("No matching jobs found")
         return
-    headers = ["ID", "Source", "Stage", "Transcript", "Summary", "Timeline", "Topics", "Provider", "Title"]
+    headers = ["ID", "Source", "Stage", "Transcript", "Analyses", "Latest analysis", "Provider", "Title"]
     rows = []
     for job in inventory["jobs"]:
-        statuses = [job["analysis"]["status"], job["navigation"]["timeline"]["status"], job["navigation"]["topics"]["status"]]
+        analyses = job["analyses"]
+        latest = analyses[0]["status"] if analyses else (
+            "not_supported" if inventory["storage"]["backend"] == "json" else "not_created"
+        )
         rows.append([
             job["id"], job["source"] or "Unknown", job["stage"],
             "Yes" if job["transcript"]["available"] else "No",
-            *(value.replace("_", " ").capitalize() for value in statuses),
+            str(len(analyses)), latest.replace("_", " ").capitalize(),
             job["transcription_provider"] or "-", " ".join((job["title"] or job["id"]).split()),
         ])
     widths = [max(len(row[index]) for row in [headers] + rows) for index in range(len(headers))]
     for row in [headers] + rows:
         print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
     print(f"Total: {inventory['total']}")
+
+
+def _analyses_main(arguments: List[str]) -> None:
+    from transcripts.inventory import saved_analysis_inventory
+
+    parser = argparse.ArgumentParser(prog="transcribe analyses", description="List saved analyses for one transcript without changing records.")
+    parser.add_argument("--id", dest="job_id", required=True, help="Exact job ID from transcribe list")
+    parser.add_argument("--json", dest="as_json", action="store_true")
+    args = parser.parse_args(arguments)
+    try:
+        result = saved_analysis_inventory(args.job_id)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
+        parser.exit(1, f"Could not read saved analyses: {error}\n")
+    if args.as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(f"Storage: {result['storage']['backend']} · {result['storage']['path']}")
+    if not result["analyses"]:
+        print("No saved analyses")
+        return
+    for analysis in result["analyses"]:
+        print(f"{analysis['id']}  {analysis['view'] or 'summary'}  {analysis['status']}  {analysis['name']}")
+    print(f"Total: {result['total']}")
+
+
+def _print_saved_analysis(analysis: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(analysis, indent=2, ensure_ascii=False))
+        return
+    print(analysis["name"])
+    print(f"ID: {analysis['id']} · {analysis['view'] or 'summary'} · {analysis['status']}")
+    print(f"Model: {analysis.get('provider') or '-'} / {analysis.get('model') or '-'}")
+    if analysis.get("prompt"):
+        print(f"Prompt: {analysis['prompt']}")
+    if analysis.get("error"):
+        print(f"Error: {analysis['error']}")
+    if analysis.get("summary"):
+        print()
+        print(analysis["summary"])
+    for point in analysis.get("key_points") or []:
+        print(f"- {point}")
+
+
+def _analysis_main(arguments: List[str]) -> None:
+    from transcripts.inventory import saved_analysis_inventory
+
+    parser = argparse.ArgumentParser(prog="transcribe analysis", description="Read or delete a specific saved analysis.")
+    parser.add_argument("--id", dest="job_id", required=True, help="Exact job ID")
+    parser.add_argument("--analysis-id", required=True, help="Exact saved analysis ID")
+    parser.add_argument("--json", dest="as_json", action="store_true", help="Include the complete visualization as JSON")
+    parser.add_argument("--delete", action="store_true", help="Delete only this analysis")
+    args = parser.parse_args(arguments)
+    try:
+        if args.delete:
+            storage = StateManager()._storage
+            if not hasattr(storage, "delete_saved_analysis"):
+                raise ValueError("Saved analyses require SQLite storage")
+            if not storage.delete_saved_analysis(args.job_id, args.analysis_id):
+                raise ValueError(f"Analysis not found for job {args.job_id}: {args.analysis_id}")
+            print(json.dumps({"deleted": args.analysis_id}) if args.as_json else f"Deleted analysis {args.analysis_id}")
+        else:
+            result = saved_analysis_inventory(args.job_id, args.analysis_id)
+            if args.as_json:
+                print(json.dumps({"storage": result["storage"], "analysis": result["analyses"][0]}, indent=2, ensure_ascii=False))
+            else:
+                _print_saved_analysis(result["analyses"][0], False)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
+        parser.exit(1, f"Could not access saved analysis: {error}\n")
+
+
+def _analyze_main(arguments: List[str]) -> None:
+    from transcripts.analyses import AnalysisConflictError, create_and_run_analysis
+
+    parser = argparse.ArgumentParser(prog="transcribe analyze", description="Create a new saved summary and Timeline or Topics analysis. Existing versions are preserved.")
+    parser.add_argument("--id", dest="job_id", required=True, help="Exact completed job ID")
+    parser.add_argument("--view", choices=["timeline", "topics"], help="Visualization (required for a new analysis)")
+    parser.add_argument("--name", help="Name of the saved analysis")
+    prompt = parser.add_mutually_exclusive_group()
+    prompt.add_argument("--prompt", help="Focus instructions that supplement the existing output format")
+    prompt.add_argument("--prompt-file", help="Read focus instructions from a UTF-8 file")
+    parser.add_argument("--provider", choices=["kimi", "fireworks"], help="Analysis inference provider")
+    parser.add_argument("--model", help="Analysis inference model ID")
+    parser.add_argument("--from-analysis", help="Create a new version using this analysis's saved settings, with optional overrides")
+    parser.add_argument("--json", dest="as_json", action="store_true", help="Print the complete saved result as JSON")
+    args = parser.parse_args(arguments)
+    if not args.view and not args.from_analysis:
+        parser.error("--view is required unless --from-analysis is supplied")
+    try:
+        focus = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else args.prompt
+        storage = StateManager()._storage
+        if not hasattr(storage, "create_saved_analysis"):
+            raise ValueError("Saved analyses require SQLite storage")
+        previous = None
+        if args.from_analysis:
+            previous = storage.get_saved_analysis(args.job_id, args.from_analysis)
+            if previous is None:
+                raise ValueError(f"Analysis not found for job {args.job_id}: {args.from_analysis}")
+        view = args.view or (previous.view if previous else None)
+        if not view:
+            raise ValueError("Choose --view timeline or topics for a legacy summary-only analysis")
+        name = args.name if args.name is not None else previous.name if previous else f"{view.title()} analysis"
+        provider = args.provider or (previous.provider if previous else None)
+        model = args.model
+        if model is None and previous and (args.provider is None or args.provider == previous.provider):
+            model = previous.model
+        if focus is None:
+            focus = previous.prompt if previous else ""
+        analysis = create_and_run_analysis(storage, args.job_id, name, view, focus, provider, model)
+        _print_saved_analysis(analysis.to_dict(), args.as_json)
+        if analysis.status.value == "failed":
+            raise SystemExit(1)
+    except KeyboardInterrupt:
+        parser.exit(1, "Analysis interrupted\n")
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, AnalysisConflictError) as error:
+        parser.exit(1, f"Could not create saved analysis: {error}\n")
 
 
 def _retry_failed(state_manager: StateManager, args) -> None:

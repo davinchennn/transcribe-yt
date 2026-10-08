@@ -24,12 +24,12 @@ transcribe list --stage completed
 
 `transcribe list` replaces `transcribe --status`. It lists full titles, stable
 job IDs, video platforms, processing stages, transcription providers, transcript
-availability, and separate summary, Timeline and Topics statuses. Use `--query`
+availability, saved-analysis counts and the newest analysis's status. Use `--query`
 to match a title, URL or ID without case sensitivity; combine it with `--source`,
 `--id` or `--stage` to select the right video.
 
 `--json` also includes duration in seconds, word count, word-timing availability,
-analysis providers and models, update times and errors, navigation node counts and hierarchy
+analysis IDs, names, prompts, visualization types, providers and models, update times and errors, node counts and hierarchy
 depth, and saved media paths with file-existence checks. `not_created` means
 there is no saved analysis; `failed` means an analysis was attempted and failed.
 The JSON storage backend reports analyses as `not_supported` and discovers
@@ -71,3 +71,43 @@ transcribe --help
 transcribe list --help
 transcribe show --help
 ```
+
+## Create and manage saved analyses
+
+Each completed transcript can have several named analyses. Each new analysis
+includes a summary, key points and one visualization: `timeline` or `topics`.
+Prompts refine the existing output format; Timeline always covers the entire
+video chronologically. Creating or regenerating an analysis preserves earlier
+versions and does not transcribe or download the video again.
+
+```bash
+transcribe analyze --id JOB_ID --view timeline --name "Engineering perspective" --prompt "Emphasize engineering tradeoffs"
+transcribe analyze --id JOB_ID --view topics --name "Hiring advice" --prompt-file focus.txt --provider fireworks --model MODEL_ID
+transcribe analyses --id JOB_ID --json
+transcribe analysis --id JOB_ID --analysis-id ANALYSIS_ID --json
+transcribe analyze --id JOB_ID --from-analysis ANALYSIS_ID --prompt "Explain the tradeoffs in greater detail" --json
+transcribe analysis --id JOB_ID --analysis-id ANALYSIS_ID --delete
+```
+
+`analyze` waits for generation and saves the result with a new analysis ID. With
+`--from-analysis`, omitted name, visualization, prompt and inference settings
+come from that saved analysis. Any overrides apply only to the new version.
+Choosing a different provider without a model uses that provider's configured
+default. A migrated summary-only analysis needs an explicit `--view` to generate
+a visualization. Empty prompts are allowed; `--prompt ""` clears inherited focus.
+Names need not be unique. Use exact analysis IDs to distinguish versions.
+
+`analyses` lists newest first. `analysis` reads one complete result, including its
+visualization nodes with `--json`. Both reads use SQLite in read-only mode;
+they do not initialize or migrate storage or make model requests. `list --json`
+includes an `analyses` collection, `analysis_count` and `analyses_supported` for
+each video. Before an old database is first opened by the updated app, read-only
+commands describe old results using their eventual imported IDs; they do not
+migrate storage. Storage initialization imports and verifies those results, then
+removes the old analysis tables.
+
+Generation requires SQLite storage and a configured inference API key. The JSON
+backend retains its existing job/transcript support. Failed generated analyses
+remain saved with their error; `analyze` exits with status 1 on failure and status
+2 for invalid command arguments. `--json` writes the saved result to stdout.
+Deleting an analysis leaves the transcript and other analyses intact.

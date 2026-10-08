@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../api/client';
-import type { CreateJobOptions, NavigationView, InferenceSelection } from '../api/client';
+import type { CreateAnalysisOptions, CreateJobOptions, SavedAnalysis } from '../api/client';
 
 export function useJobs() {
   return useQuery({
@@ -15,44 +15,42 @@ export function useJob(id: string | null, refetchInterval?: number | false) {
     queryKey: ['job', id],
     queryFn: () => (id ? api.getJob(id) : null),
     enabled: !!id,
-    refetchInterval: refetchInterval ?? ((query) => {
-      const status = query.state.data?.analysis?.status;
-      return status === 'pending' || status === 'processing' ? 2000 : false;
-    }),
+    refetchInterval: refetchInterval ?? ((query) => query.state.data?.analyses.some((analysis) => analysis.status === 'pending' || analysis.status === 'processing') ? 2000 : false),
   });
 }
 
-export function useNavigation(id: string, view: NavigationView) {
+export function useAnalyses(jobId: string, initialData?: SavedAnalysis[]) {
   return useQuery({
-    queryKey: ['navigation', id, view],
-    queryFn: () => api.getNavigation(id, view),
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return status === 'pending' || status === 'processing' ? 2000 : false;
+    queryKey: ['analyses', jobId],
+    queryFn: () => api.listAnalyses(jobId),
+    initialData,
+    refetchInterval: (query) => query.state.data?.some((analysis) => analysis.status === 'pending' || analysis.status === 'processing') ? 2000 : false,
+  });
+}
+
+export function useCreateAnalysis(jobId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ options, sourceId }: { options: CreateAnalysisOptions; sourceId?: string }) => sourceId
+      ? api.regenerateAnalysis(jobId, sourceId, options) : api.createAnalysis(jobId, options),
+    onSuccess: async (analysis) => {
+      await queryClient.cancelQueries({ queryKey: ['analyses', jobId], exact: true });
+      queryClient.setQueryData<SavedAnalysis[]>(['analyses', jobId], (previous = []) => [analysis, ...previous.filter((item) => item.id !== analysis.id)]);
+      queryClient.invalidateQueries({ queryKey: ['analyses', jobId] });
+      queryClient.invalidateQueries({ queryKey: ['job', jobId] });
     },
   });
 }
 
-export function useCreateNavigation(id: string, selection?: InferenceSelection) {
+export function useDeleteAnalysis(jobId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (view: NavigationView) => api.createNavigation(id, view, selection),
-    onSuccess: async (data, view) => {
-      await queryClient.cancelQueries({ queryKey: ['navigation', id, view], exact: true });
-      queryClient.setQueryData(['navigation', id, view], data);
-      queryClient.invalidateQueries({ queryKey: ['job', id] });
-    },
-  });
-}
-
-export function useUpdateNavigationSummaries(id: string, selection?: InferenceSelection) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (view: NavigationView) => api.updateNavigationSummaries(id, view, selection),
-    onSuccess: async (data, view) => {
-      await queryClient.cancelQueries({ queryKey: ['navigation', id, view], exact: true });
-      queryClient.setQueryData(['navigation', id, view], data);
-      queryClient.invalidateQueries({ queryKey: ['job', id] });
+    mutationFn: (analysisId: string) => api.deleteAnalysis(jobId, analysisId),
+    onSuccess: async (_result, analysisId) => {
+      await queryClient.cancelQueries({ queryKey: ['analyses', jobId], exact: true });
+      queryClient.setQueryData<SavedAnalysis[]>(['analyses', jobId], (previous = []) => previous.filter((item) => item.id !== analysisId));
+      queryClient.invalidateQueries({ queryKey: ['analyses', jobId] });
+      queryClient.invalidateQueries({ queryKey: ['job', jobId] });
     },
   });
 }
@@ -86,17 +84,6 @@ export function useDeleteJob() {
     mutationFn: (id: string) => api.deleteJob(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
-    },
-  });
-}
-
-export function useAnalyzeJob(selection?: InferenceSelection) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (id: string) => api.analyzeJob(id, selection),
-    onSuccess: (_data, id) => {
-      queryClient.invalidateQueries({ queryKey: ['job', id] });
     },
   });
 }

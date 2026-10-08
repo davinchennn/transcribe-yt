@@ -1,6 +1,6 @@
 """CLI discovery distinguishes sources and reads existing data without bootstrap."""
 
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 import io
 import json
 import os
@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from transcripts.cli.main import main
 from transcripts.inventory import list_inventory
-from transcripts.models import Analysis, AnalysisStatus, NavigationAnalysis, Stage, Transcript, Word
+from transcripts.models import AnalysisStatus, SavedAnalysis, Stage, Transcript, Utterance, Word
 from transcripts.storage.sqlite import SQLiteStorage
 
 
@@ -41,9 +41,23 @@ class TestInventoryCLI(unittest.TestCase):
             words=[Word("Source", 1000, 1200), Word("words", 1300, 1500)],
         ))
         nodes = [{"id": "root", "children": [{"id": "child", "children": [], "occurrences": [{}]}], "occurrences": [{}]}]
-        self.storage.save_navigation(NavigationAnalysis(self.x.id, "topics", AnalysisStatus.COMPLETED, nodes=nodes, model="k3"))
-        self.storage.save_navigation(NavigationAnalysis(self.youtube.id, "topics", AnalysisStatus.FAILED, error="Invalid ranges"))
-        self.storage.save_analysis(Analysis(self.youtube.id, AnalysisStatus.COMPLETED, key_points=["Point"], model="k3"))
+        self.x_topics = self.storage.create_saved_analysis(self.x.id, "Topics", "topics", "", "kimi", "k3")
+        self.x_topics.status = AnalysisStatus.COMPLETED
+        self.x_topics.nodes = nodes
+        self.storage.finish_saved_analysis(self.x_topics, self.storage.get_transcript(self.x.id))
+        # Imported results remain discoverable even if their transcript is missing.
+        self.youtube_topics = SavedAnalysis("youtube-topics", self.youtube.id, "Topics", "topics",
+                                             status=AnalysisStatus.FAILED, error="Invalid ranges")
+        self.youtube_summary = SavedAnalysis("youtube-summary", self.youtube.id, "General summary", None,
+                                              status=AnalysisStatus.COMPLETED, key_points=["Point"], model="k3")
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            for saved in (self.youtube_topics, self.youtube_summary):
+                data = saved.to_dict()
+                data["key_points"] = json.dumps(data["key_points"])
+                data["nodes"] = json.dumps(data["nodes"])
+                columns = list(data)
+                connection.execute(f"INSERT INTO video_analyses ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                                   [data[column] for column in columns])
 
     def inventory(self, **filters):
         return list_inventory(backend="sqlite", storage_path=str(self.path), **filters)
@@ -76,18 +90,22 @@ class TestInventoryCLI(unittest.TestCase):
         self.assertTrue(x["files"]["video"]["exists"])
         self.assertFalse(x["files"]["audio"]["exists"])
         self.assertFalse(x["files"]["transcript_export"]["exists"])
-        self.assertEqual(x["analysis"]["status"], "not_created")
-        self.assertEqual(x["navigation"]["topics"]["status"], "completed")
-        self.assertEqual(x["navigation"]["topics"]["node_count"], 2)
-        self.assertEqual(x["navigation"]["topics"]["depth"], 2)
-        self.assertEqual(x["navigation"]["topics"]["occurrence_count"], 2)
-        self.assertEqual(x["navigation"]["timeline"]["status"], "not_created")
+        self.assertEqual(x["analysis_count"], 1)
+        self.assertTrue(x["analyses_supported"])
+        topics = x["analyses"][0]
+        self.assertEqual(topics["status"], "completed")
+        self.assertEqual(topics["node_count"], 2)
+        self.assertEqual(topics["depth"], 2)
+        self.assertEqual(topics["occurrence_count"], 2)
+        self.assertNotIn("analysis", x)
+        self.assertNotIn("navigation", x)
         youtube = jobs[self.youtube.id]
         self.assertEqual(youtube["source"], "youtube")
         self.assertFalse(youtube["transcript"]["available"])
-        self.assertEqual(youtube["analysis"]["key_point_count"], 1)
-        self.assertEqual(youtube["navigation"]["topics"]["status"], "failed")
-        self.assertEqual(youtube["navigation"]["topics"]["error"], "Invalid ranges")
+        results = {result["id"]: result for result in youtube["analyses"]}
+        self.assertEqual(results[self.youtube_summary.id]["key_point_count"], 1)
+        self.assertEqual(results[self.youtube_topics.id]["status"], "failed")
+        self.assertEqual(results[self.youtube_topics.id]["error"], "Invalid ranges")
 
     def test_filters_combine_and_match_titles_urls_and_exact_ids(self):
         for query in ("lauren", "x.com", self.x.id):
@@ -136,6 +154,18 @@ class TestInventoryCLI(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse((self.root / "missing.db").exists())
 
+    def test_show_reads_stored_turns_after_column_removal(self):
+        turns = [Utterance("A", "A timed passage", 100, 200)]
+        self.storage.save_transcript(self.x.id, Transcript(self.x.url, self.title,
+                                     transcript_text="A timed passage", utterances=turns))
+        before = self.path.read_bytes()
+        code, output, error = self.cli(["show", "--id", self.x.id, "--json"])
+        self.assertEqual(code, 0, error)
+        transcript = json.loads(output)["job"]["transcript"]
+        self.assertEqual(transcript["utterances"], [vars(turn) for turn in turns])
+        self.assertEqual(transcript["metadata"]["_stored_utterances"], transcript["utterances"])
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_show_json_backend_reads_json_and_text_exports(self):
         for suffix in ("json", "txt"):
             export = self.root / f"transcript.{suffix}"
@@ -160,8 +190,9 @@ class TestInventoryCLI(unittest.TestCase):
         self.assertIn(self.x.id, output)
         self.assertIn(self.youtube.id, output)
         self.assertIn("youtube", output)
-        self.assertIn("Not created", output)
-        self.assertIn("Failed", output)
+        self.assertIn("Completed", output)
+        self.assertIn("Analyses", output)
+        self.assertIn("Latest analysis", output)
 
     def test_removed_flag_and_list_help_do_not_initialize_storage(self):
         code, output, error = self.cli(["--status"])
@@ -214,13 +245,13 @@ class TestInventoryCLI(unittest.TestCase):
 
     def test_legacy_sqlite_is_read_without_creating_missing_feature_tables(self):
         path = self.root / "legacy.db"
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection, connection:
             connection.execute("CREATE TABLE jobs (id TEXT, url TEXT, title TEXT, stage TEXT, updated_at TEXT)")
             connection.execute("INSERT INTO jobs VALUES (?, ?, ?, ?, ?)", (self.youtube.id, self.youtube.url, "Legacy", "completed", "2026-01-01"))
         before = path.read_bytes()
         inventory = list_inventory(backend="sqlite", storage_path=str(path))
         self.assertFalse(inventory["jobs"][0]["transcript"]["available"])
-        self.assertEqual(inventory["jobs"][0]["navigation"]["topics"]["status"], "not_created")
+        self.assertEqual(inventory["jobs"][0]["analyses"], [])
         self.assertEqual(path.read_bytes(), before)
 
     def test_json_backend_reads_exports_without_creating_lock_files(self):
@@ -238,7 +269,7 @@ class TestInventoryCLI(unittest.TestCase):
         self.assertTrue(item["transcript"]["available"])
         self.assertEqual(item["transcript"]["word_count"], 1)
         self.assertEqual(item["transcript"]["storage"], "file")
-        self.assertEqual(item["navigation"]["topics"]["status"], "not_supported")
+        self.assertFalse(item["analyses_supported"])
         self.assertEqual(set(self.root.iterdir()), files_before)
         self.assertEqual(state.read_bytes(), state_before)
 

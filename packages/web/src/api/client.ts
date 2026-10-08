@@ -39,23 +39,10 @@ export interface Transcript {
   utterances: Utterance[];
 }
 
-export interface Analysis {
-  job_id: string;
-  status: string;
-  summary: string | null;
-  key_points: string[];
-  model: string | null;
-  provider?: string | null;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface JobDetail {
   job: Job;
   transcript: Transcript | null;
-  analysis: Analysis | null;
-  navigation?: Partial<Record<NavigationView, NavigationAnalysis | null>>;
+  analyses: SavedAnalysis[];
 }
 
 export type NavigationView = 'timeline' | 'topics';
@@ -84,17 +71,29 @@ export interface NavigationNode {
   occurrences: Passage[];
 }
 
-export interface NavigationAnalysis {
+export interface SavedAnalysis {
+  id: string;
   job_id: string;
-  view: NavigationView;
+  name: string;
+  view: NavigationView | null;
+  prompt: string;
   status: string;
   summary: string | null;
+  key_points: string[];
   nodes: NavigationNode[];
   model: string | null;
   provider?: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface CreateAnalysisOptions {
+  name: string;
+  view: NavigationView;
+  prompt?: string;
+  provider?: string;
+  model?: string;
 }
 
 export interface SearchResponse {
@@ -214,28 +213,29 @@ export async function clearJobs(stage?: string): Promise<{ cleared: number }> {
   });
 }
 
-export async function analyzeJob(id: string, selection?: InferenceSelection): Promise<Analysis> {
-  return fetchJson(`${API_BASE}/jobs/${id}/analyze`, {
-    method: 'POST',
-    body: JSON.stringify(selection),
-  });
-}
-
-export async function getNavigation(id: string, view: NavigationView): Promise<NavigationAnalysis | null> {
-  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}`);
-}
-
-export async function createNavigation(id: string, view: NavigationView, selection?: InferenceSelection): Promise<NavigationAnalysis> {
-  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}`, { method: 'POST', body: JSON.stringify(selection) });
-}
-
-export async function updateNavigationSummaries(id: string, view: NavigationView, selection?: InferenceSelection): Promise<NavigationAnalysis> {
-  return fetchJson(`${API_BASE}/jobs/${id}/navigation/${view}/summaries`, { method: 'POST', body: JSON.stringify(selection) });
-}
-
 export async function searchTranscript(id: string, query: string, mode: SearchMode, selection?: InferenceSelection): Promise<SearchResponse> {
   return fetchJson(`${API_BASE}/jobs/${id}/search`, {
     method: 'POST',
     body: JSON.stringify({ query, mode, ...selection }),
   });
+}
+
+export async function listAnalyses(jobId: string): Promise<SavedAnalysis[]> {
+  return fetchJson(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/analyses`);
+}
+
+export async function getSavedAnalysis(jobId: string, analysisId: string): Promise<SavedAnalysis> {
+  return fetchJson(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/analyses/${encodeURIComponent(analysisId)}`);
+}
+
+export async function createAnalysis(jobId: string, options: CreateAnalysisOptions): Promise<SavedAnalysis> {
+  return fetchJson(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/analyses`, { method: 'POST', body: JSON.stringify(options) });
+}
+
+export async function regenerateAnalysis(jobId: string, analysisId: string, options: Partial<CreateAnalysisOptions>): Promise<SavedAnalysis> {
+  return fetchJson(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/analyses/${encodeURIComponent(analysisId)}/regenerate`, { method: 'POST', body: JSON.stringify(options) });
+}
+
+export async function deleteAnalysis(jobId: string, analysisId: string): Promise<{ deleted: boolean }> {
+  return fetchJson(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/analyses/${encodeURIComponent(analysisId)}`, { method: 'DELETE' });
 }

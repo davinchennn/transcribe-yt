@@ -1,12 +1,14 @@
 """SQLite storage backend for job persistence and transcript storage."""
 
 import json
+import hashlib
 import sqlite3
-from datetime import datetime, timedelta
+from uuid import NAMESPACE_URL, uuid4, uuid5
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from transcripts.models import Job, Stage, Transcript, Word, Utterance, derive_utterances, Analysis, AnalysisStatus, NavigationAnalysis
+from transcripts.models import Job, Stage, Transcript, Word, Utterance, derive_utterances, AnalysisStatus, SavedAnalysis
 from transcripts.storage.base import StorageBackend, extract_video_id
 
 
@@ -90,7 +92,6 @@ class SQLiteStorage(StorageBackend):
                     duration REAL,
                     transcript_text TEXT NOT NULL,
                     words TEXT,
-                    utterances TEXT,
                     metadata TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
@@ -135,45 +136,129 @@ class SQLiteStorage(StorageBackend):
                 END
             """)
 
-            # Analyses table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS analyses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    job_id TEXT UNIQUE NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    summary TEXT,
-                    key_points TEXT,
-                    model TEXT,
-                    error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
-                )
-            """)
-
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS navigation_analyses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    job_id TEXT NOT NULL,
-                    view TEXT NOT NULL CHECK(view IN ('timeline', 'topics')),
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    summary TEXT,
-                    nodes TEXT NOT NULL DEFAULT '[]',
-                    model TEXT,
-                    error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(job_id, view),
-                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
-                )
-            """)
-
-            for table in ("analyses", "navigation_analyses"):
-                columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-                if "provider" not in columns:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN provider TEXT DEFAULT 'kimi'")
-
+            self._init_saved_analyses(conn)
             conn.commit()
+
+    @staticmethod
+    def _transcript_hash(transcript: Transcript) -> str:
+        source = {
+            "text": transcript.transcript_text,
+            "words": [vars(word) for word in transcript.words],
+            "utterances": [vars(turn) for turn in transcript.utterances],
+        }
+        return hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    def _init_saved_analyses(self, conn: sqlite3.Connection) -> None:
+        """Verify lossless imports before removing the old per-job result tables."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS video_analyses (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                view TEXT CHECK(view IS NULL OR view IN ('timeline', 'topics')),
+                prompt TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                summary TEXT,
+                key_points TEXT NOT NULL DEFAULT '[]',
+                nodes TEXT NOT NULL DEFAULT '[]',
+                provider TEXT,
+                model TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                source_hash TEXT,
+                FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_video_analyses_job_created ON video_analyses(job_id, created_at DESC)")
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+        conn.execute("BEGIN IMMEDIATE")
+        self._remove_stored_utterances(conn)
+        original_migration = "saved_analysis_versions_v1"
+        applied = conn.execute("SELECT applied_at FROM schema_migrations WHERE name = ?", (original_migration,)).fetchone()
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        for table in ("analyses", "navigation_analyses"):
+            if table not in tables:
+                continue
+            rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+            for row in rows:
+                data = dict(row)
+                view = data.get("view") if table == "navigation_analyses" else None
+                analysis_id = str(uuid5(NAMESPACE_URL, f"transcribe-yt:{table}:{data['job_id']}:{data['id']}"))
+                source = conn.execute("SELECT * FROM transcripts WHERE job_id = ?", (data["job_id"],)).fetchone()
+                source_hash = self._transcript_hash(self._row_to_transcript(source)) if source else None
+                expected = SavedAnalysis(
+                    id=analysis_id, job_id=data["job_id"], name=view.title() if view else "General summary",
+                    view=view, status=AnalysisStatus(data["status"]), summary=data.get("summary"),
+                    key_points=json.loads(data.get("key_points") or "[]") if view is None else [],
+                    nodes=json.loads(data.get("nodes") or "[]") if view else [],
+                    provider=data.get("provider", "kimi"), model=data.get("model"), error=data.get("error"),
+                    created_at=data["created_at"], updated_at=data["updated_at"],
+                )
+                if not isinstance(expected.key_points, list) or not isinstance(expected.nodes, list):
+                    raise ValueError(f"Cannot migrate invalid legacy analysis arrays in {table}/{data['id']}")
+                copied = conn.execute("SELECT * FROM video_analyses WHERE id = ?", (analysis_id,)).fetchone()
+                if applied and copied is None and expected.created_at <= applied["applied_at"]:
+                    if expected.updated_at > applied["applied_at"]:
+                        raise ValueError(
+                            f"Cannot verify changed legacy result {table}/{data['id']}: its original version is missing"
+                        )
+                    # The first migration already copied this old result. Its
+                    # missing immutable version represents an intentional deletion.
+                    continue
+                if copied is not None and self._row_to_saved_analysis(copied).to_dict() != expected.to_dict():
+                    # Old endpoints could change their cache after the first copy.
+                    # Preserve that newer legacy state as another immutable version.
+                    content = expected.to_dict()
+                    content.pop("id")
+                    digest = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                    expected.id = str(uuid5(NAMESPACE_URL, f"transcribe-yt:legacy-revision:{analysis_id}:{digest}"))
+                    copied = conn.execute("SELECT * FROM video_analyses WHERE id = ?", (expected.id,)).fetchone()
+                if copied is None:
+                    self._insert_imported_analysis(conn, expected, source_hash)
+                    copied = conn.execute("SELECT * FROM video_analyses WHERE id = ?", (expected.id,)).fetchone()
+                if copied is None or self._row_to_saved_analysis(copied).to_dict() != expected.to_dict():
+                    raise ValueError(f"Legacy analysis verification failed for {table}/{data['id']}")
+            conn.execute(f"DROP TABLE {table}")
+        now = datetime.utcnow().isoformat()
+        conn.execute("INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)", (original_migration, now))
+        conn.execute("INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)", ("saved_analysis_cleanup_v2", now))
+
+    @staticmethod
+    def _remove_stored_utterances(conn: sqlite3.Connection) -> None:
+        """Keep legacy turn data in supported metadata before dropping its column."""
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(transcripts)")}
+        if "utterances" not in columns:
+            return
+        for row in conn.execute("SELECT id, utterances, metadata FROM transcripts WHERE utterances IS NOT NULL").fetchall():
+            turns = json.loads(row["utterances"])
+            metadata = json.loads(row["metadata"] or "{}")
+            if not isinstance(turns, list) or not isinstance(metadata, dict):
+                raise ValueError(f"Cannot preserve invalid stored utterances for transcript {row['id']}")
+            if "_stored_utterances" in metadata and metadata["_stored_utterances"] != turns:
+                raise ValueError(f"Stored utterances conflict with metadata for transcript {row['id']}")
+            metadata["_stored_utterances"] = turns
+            conn.execute("UPDATE transcripts SET metadata = ? WHERE id = ?", (json.dumps(metadata), row["id"]))
+        conn.execute("ALTER TABLE transcripts DROP COLUMN utterances")
+
+    @staticmethod
+    def _metadata_utterances(metadata: Dict[str, Any]) -> List[Utterance]:
+        turns = metadata.get("_stored_utterances") or []
+        if not isinstance(turns, list):
+            raise ValueError("Stored transcript utterances must be a JSON array")
+        return [Utterance(speaker=turn["speaker"], text=turn["text"], start=turn["start"],
+                          end=turn["end"], confidence=turn.get("confidence")) for turn in turns]
+
+    @staticmethod
+    def _insert_imported_analysis(conn: sqlite3.Connection, analysis: SavedAnalysis, source_hash: Optional[str]) -> None:
+        conn.execute("""
+            INSERT INTO video_analyses
+            (id, job_id, name, view, prompt, status, summary, key_points, nodes,
+             provider, model, error, created_at, updated_at, source_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (analysis.id, analysis.job_id, analysis.name, analysis.view, analysis.prompt,
+              analysis.status.value, analysis.summary, json.dumps(analysis.key_points), json.dumps(analysis.nodes),
+              analysis.provider, analysis.model, analysis.error, analysis.created_at, analysis.updated_at, source_hash))
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
         """Convert a database row to a Job object."""
@@ -349,7 +434,7 @@ class SQLiteStorage(StorageBackend):
     def delete_job(self, job_id: str) -> bool:
         """Delete a single job by ID."""
         with self._get_connection() as conn:
-            conn.execute("DELETE FROM navigation_analyses WHERE job_id = ?", (job_id,))
+            conn.execute("DELETE FROM video_analyses WHERE job_id = ?", (job_id,))
             cursor = conn.execute(
                 "DELETE FROM jobs WHERE id = ?", (job_id,)
             )
@@ -361,7 +446,7 @@ class SQLiteStorage(StorageBackend):
         with self._get_connection() as conn:
             if filter_stage:
                 conn.execute(
-                    "DELETE FROM navigation_analyses WHERE job_id IN (SELECT id FROM jobs WHERE stage = ?)",
+                    "DELETE FROM video_analyses WHERE job_id IN (SELECT id FROM jobs WHERE stage = ?)",
                     (filter_stage.value,),
                 )
                 cursor = conn.execute(
@@ -369,7 +454,7 @@ class SQLiteStorage(StorageBackend):
                     (filter_stage.value,),
                 )
             else:
-                conn.execute("DELETE FROM navigation_analyses")
+                conn.execute("DELETE FROM video_analyses")
                 cursor = conn.execute("DELETE FROM jobs")
 
             conn.commit()
@@ -431,10 +516,10 @@ class SQLiteStorage(StorageBackend):
             job_id: Job ID to link transcript to
             transcript: Transcript object to save
 
-        Note:
-            Utterances are not saved - they are derived from words on retrieval.
+        Utterances are derived from words. Utterance-only source data is retained
+        in metadata so removing the redundant column does not lose old timings.
         """
-        # Serialize words to JSON (utterances are derived on-the-fly, not stored)
+        # Word timings supply derived turns; utterance-only data uses metadata.
         words_json = json.dumps(
             [
                 {
@@ -448,27 +533,32 @@ class SQLiteStorage(StorageBackend):
             ]
         ) if transcript.words else None
 
-        metadata_json = json.dumps(transcript.metadata) if transcript.metadata else None
+        metadata = dict(transcript.metadata)
+        if not transcript.words and transcript.utterances and self._metadata_utterances(metadata) != transcript.utterances:
+            metadata["_stored_utterances"] = [vars(turn) for turn in transcript.utterances]
+        metadata_json = json.dumps(metadata) if metadata else None
+        effective_source = Transcript(
+            transcript.video_url, transcript.title, transcript_text=transcript.transcript_text,
+            words=transcript.words,
+            utterances=derive_utterances(transcript.words) if transcript.words else self._metadata_utterances(metadata),
+        )
 
         with self._get_connection() as conn:
             # Compare and invalidate in the same write transaction so a source
             # replacement cannot leave navigation anchored to older word times.
             conn.execute("BEGIN IMMEDIATE")
             previous = conn.execute(
-                "SELECT transcript_text, words FROM transcripts WHERE job_id = ?",
+                "SELECT * FROM transcripts WHERE job_id = ?",
                 (job_id,),
             ).fetchone()
-            if previous is not None and (
-                previous["transcript_text"] != transcript.transcript_text
-                or previous["words"] != words_json
-            ):
-                conn.execute("DELETE FROM navigation_analyses WHERE job_id = ?", (job_id,))
+            if previous is not None and self._transcript_hash(self._row_to_transcript(previous)) != self._transcript_hash(effective_source):
+                conn.execute("DELETE FROM video_analyses WHERE job_id = ?", (job_id,))
             conn.execute(
                 """
                 INSERT OR REPLACE INTO transcripts
                 (job_id, video_url, title, duration, transcript_text,
-                 words, utterances, metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 words, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -477,7 +567,6 @@ class SQLiteStorage(StorageBackend):
                     transcript.duration,
                     transcript.transcript_text,
                     words_json,
-                    None,  # utterances - derived on retrieval, not stored
                     metadata_json,
                     transcript.created_at,
                 ),
@@ -506,10 +595,8 @@ class SQLiteStorage(StorageBackend):
     def _row_to_transcript(self, row: sqlite3.Row) -> Transcript:
         """Convert database row to Transcript object.
 
-        Note:
-            Utterances are derived from words, not read from database.
-            This supports both old records (with stored utterances) and
-            new records (utterances derived on-the-fly).
+        Word timings determine utterances when present; preserved turn data in
+        metadata supplies the fallback for older utterance-only transcripts.
         """
         # Deserialize words
         words = []
@@ -526,13 +613,12 @@ class SQLiteStorage(StorageBackend):
                 for w in words_data
             ]
 
-        # Derive utterances from words (don't read from database)
-        utterances = derive_utterances(words)
-
         # Deserialize metadata
         metadata = {}
         if row["metadata"]:
             metadata = json.loads(row["metadata"])
+
+        utterances = derive_utterances(words) if words else self._metadata_utterances(metadata)
 
         return Transcript(
             video_url=row["video_url"],
@@ -567,6 +653,7 @@ class SQLiteStorage(StorageBackend):
             True if deleted, False if not found
         """
         with self._get_connection() as conn:
+            conn.execute("DELETE FROM video_analyses WHERE job_id = ?", (job_id,))
             cursor = conn.execute(
                 "DELETE FROM transcripts WHERE job_id = ?", (job_id,)
             )
@@ -612,218 +699,126 @@ class SQLiteStorage(StorageBackend):
 
             return results
 
-    # -------------------------------------------------------------------------
-    # Analysis Methods
-    # -------------------------------------------------------------------------
+    # Immutable named analysis versions.
 
-    def save_analysis(self, analysis: Analysis) -> None:
-        """Save or update an analysis in the database."""
-        analysis.updated_at = datetime.utcnow().isoformat()
-        key_points_json = json.dumps(analysis.key_points) if analysis.key_points else None
+    @staticmethod
+    def _row_to_saved_analysis(row: sqlite3.Row) -> SavedAnalysis:
+        values = dict(row)
+        values["key_points"] = json.loads(values["key_points"] or "[]")
+        values["nodes"] = json.loads(values["nodes"] or "[]")
+        return SavedAnalysis.from_dict(values)
 
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO analyses
-                (job_id, status, summary, key_points, model, error, created_at, updated_at, provider)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    analysis.job_id,
-                    analysis.status.value,
-                    analysis.summary,
-                    key_points_json,
-                    analysis.model,
-                    analysis.error,
-                    analysis.created_at,
-                    analysis.updated_at,
-                    analysis.provider,
-                ),
-            )
-            conn.commit()
-
-    def get_analysis(self, job_id: str) -> Optional[Analysis]:
-        """Get analysis by job ID."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM analyses WHERE job_id = ?", (job_id,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                return None
-
-            key_points = []
-            if row["key_points"]:
-                key_points = json.loads(row["key_points"])
-
-            return Analysis(
-                job_id=row["job_id"],
-                status=AnalysisStatus(row["status"]),
-                summary=row["summary"],
-                key_points=key_points,
-                model=row["model"],
-                provider=row["provider"],
-                error=row["error"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
-
-    def delete_analysis(self, job_id: str) -> bool:
-        """Delete analysis by job ID."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM analyses WHERE job_id = ?", (job_id,)
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-
-    # Timeline and topic navigation are created and cached independently.
-
-    def save_navigation(self, analysis: NavigationAnalysis) -> None:
-        """Save a navigation result without replacing the other view."""
-        if analysis.view not in ("timeline", "topics"):
-            raise ValueError("Navigation view must be 'timeline' or 'topics'")
-        analysis.updated_at = datetime.utcnow().isoformat()
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO navigation_analyses
-                (job_id, view, status, summary, nodes, model, error, created_at, updated_at, provider)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(job_id, view) DO UPDATE SET
-                    status = excluded.status, summary = excluded.summary,
-                    nodes = excluded.nodes, model = excluded.model, provider = excluded.provider,
-                    error = excluded.error, updated_at = excluded.updated_at
-                """,
-                (analysis.job_id, analysis.view, analysis.status.value,
-                 analysis.summary, json.dumps(analysis.nodes), analysis.model,
-                 analysis.error, analysis.created_at, analysis.updated_at, analysis.provider),
-            )
-            analysis.created_at = conn.execute(
-                "SELECT created_at FROM navigation_analyses WHERE job_id = ? AND view = ?",
-                (analysis.job_id, analysis.view),
-            ).fetchone()["created_at"]
-            conn.commit()
-
-    def get_navigation(self, job_id: str, view: str) -> Optional[NavigationAnalysis]:
-        with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM navigation_analyses WHERE job_id = ? AND view = ?",
-                (job_id, view),
-            ).fetchone()
-            if row is None:
-                return None
-            data = dict(row)
-            data["nodes"] = json.loads(row["nodes"])
-            return NavigationAnalysis.from_dict(data)
-
-    def save_navigation_if_current(
-        self, updated: NavigationAnalysis, expected: NavigationAnalysis, transcript: Transcript
-    ) -> bool:
-        """Atomically replace only subtopic summaries if cache and source match.
-
-        The source snapshot must come from get_transcript, whose utterances are
-        derived from stored words. Deleted or changed caches are never recreated.
-        """
-        previous = expected.to_dict()
-        replacement = updated.to_dict()
-        if expected.view not in ("timeline", "topics") or expected.status != AnalysisStatus.COMPLETED:
-            raise ValueError("Summary updates require a completed navigation view")
-        if any(previous[key] != replacement[key] for key in previous if key not in ("nodes", "updated_at")):
-            raise ValueError("Summary updates must preserve navigation metadata")
-        pending = [(expected.nodes, updated.nodes, 0)]
-        while pending:
-            old_nodes, new_nodes, depth = pending.pop()
-            if len(old_nodes) != len(new_nodes):
-                raise ValueError("Summary updates must preserve navigation hierarchy")
-            for old, new in zip(old_nodes, new_nodes):
-                ignored = {"children", "summary"} if depth else {"children"}
-                if {key: value for key, value in old.items() if key not in ignored} != {
-                    key: value for key, value in new.items() if key not in ignored
-                }:
-                    raise ValueError("Summary updates must preserve roots and source references")
-                pending.append((old.get("children", []), new.get("children", []), depth + 1))
-
+    def create_saved_analysis(
+        self, job_id: str, name: str, view: str, prompt: str = "",
+        provider: Optional[str] = None, model: Optional[str] = None,
+    ) -> SavedAnalysis:
+        """Reserve a new version; creating the same configuration never overwrites."""
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200:
+            raise ValueError("Analysis name must contain 1-200 characters")
+        if not isinstance(prompt, str) or len(prompt.strip()) > 10000:
+            raise ValueError("Analysis prompt must contain at most 10000 characters")
+        if view not in ("timeline", "topics"):
+            raise ValueError("Analysis visualization must be 'timeline' or 'topics'")
+        result = SavedAnalysis(id=str(uuid4()), job_id=job_id, name=name.strip(),
+                               view=view, prompt=prompt.strip(), provider=provider, model=model)
         with self._get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """SELECT * FROM navigation_analyses WHERE job_id = ? AND view = ?
-                   AND EXISTS (SELECT 1 FROM jobs WHERE id = ?)""",
-                (expected.job_id, expected.view, expected.job_id),
-            ).fetchone()
-            source_row = conn.execute(
-                "SELECT * FROM transcripts WHERE job_id = ?", (expected.job_id,),
-            ).fetchone()
-            if row is None or source_row is None:
+            job = conn.execute("SELECT stage FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                raise ValueError("Job not found")
+            if job["stage"] != Stage.COMPLETED.value:
+                raise ValueError("Only completed jobs can be analyzed")
+            source = conn.execute("SELECT * FROM transcripts WHERE job_id = ?", (job_id,)).fetchone()
+            if not source:
+                raise ValueError("No transcript found for this job")
+            source_hash = self._transcript_hash(self._row_to_transcript(source))
+            conn.execute("""
+                INSERT INTO video_analyses
+                (id, job_id, name, view, prompt, status, provider, model, created_at, updated_at, source_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (result.id, result.job_id, result.name, result.view, result.prompt,
+                  result.status.value, provider, model, result.created_at, result.updated_at, source_hash))
+        return result
+
+    def list_saved_analyses(self, job_id: str) -> List[SavedAnalysis]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM video_analyses WHERE job_id = ? ORDER BY created_at DESC, rowid DESC",
+                                (job_id,)).fetchall()
+            return [self._row_to_saved_analysis(row) for row in rows]
+
+    def get_saved_analysis(self, job_id: str, analysis_id: str) -> Optional[SavedAnalysis]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM video_analyses WHERE job_id = ? AND id = ?",
+                               (job_id, analysis_id)).fetchone()
+            return self._row_to_saved_analysis(row) if row else None
+
+    def delete_saved_analysis(self, job_id: str, analysis_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM video_analyses WHERE job_id = ? AND id = ?",
+                                  (job_id, analysis_id))
+            return cursor.rowcount > 0
+
+    def claim_saved_analysis(
+        self, job_id: str, analysis_id: str, transcript: Optional[Transcript] = None,
+    ) -> bool:
+        """Allow exactly one worker to start this reserved version."""
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("""
+                SELECT source_hash FROM video_analyses
+                WHERE job_id = ? AND id = ? AND status = 'pending'
+            """, (job_id, analysis_id)).fetchone()
+            if row is None:
                 return False
-            current = dict(row)
-            current["nodes"] = json.loads(row["nodes"])
-            if NavigationAnalysis.from_dict(current).to_dict() != previous:
-                return False
-            source = self._row_to_transcript(source_row)
+            source = conn.execute("SELECT * FROM transcripts WHERE job_id = ?", (job_id,)).fetchone()
             if (
-                source.transcript_text != transcript.transcript_text
-                or source.words != transcript.words
-                or source.utterances != transcript.utterances
+                source is None
+                or row["source_hash"] != self._transcript_hash(self._row_to_transcript(source))
+                or (transcript is not None and row["source_hash"] != self._transcript_hash(transcript))
+            ):
+                conn.execute("""
+                    UPDATE video_analyses SET status = 'failed', error = ?, updated_at = ?
+                    WHERE job_id = ? AND id = ?
+                """, ("Transcript changed before analysis started. Create another analysis.",
+                      datetime.utcnow().isoformat(), job_id, analysis_id))
+                return False
+            cursor = conn.execute("""
+                UPDATE video_analyses SET status = 'processing', updated_at = ?
+                WHERE job_id = ? AND id = ? AND status = 'pending'
+                  AND EXISTS (SELECT 1 FROM jobs WHERE id = ? AND stage = 'completed')
+            """, (datetime.utcnow().isoformat(), job_id, analysis_id, job_id))
+            return cursor.rowcount > 0
+
+    def finish_saved_analysis(self, result: SavedAnalysis, transcript: Transcript) -> bool:
+        """Finish once, only while the reservation and original source still exist."""
+        if result.status not in (AnalysisStatus.COMPLETED, AnalysisStatus.FAILED):
+            raise ValueError("Finishing an analysis requires a completed or failed result")
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("""
+                SELECT * FROM video_analyses WHERE job_id = ? AND id = ?
+                  AND status IN ('pending', 'processing')
+                  AND EXISTS (SELECT 1 FROM jobs WHERE id = ?)
+            """, (result.job_id, result.id, result.job_id)).fetchone()
+            source = conn.execute("SELECT * FROM transcripts WHERE job_id = ?", (result.job_id,)).fetchone()
+            if not row or not source:
+                return False
+            if any(row[key] != getattr(result, key) for key in ("name", "view", "prompt", "created_at")):
+                return False
+            if any(row[key] is not None and row[key] != getattr(result, key) for key in ("provider", "model")):
+                return False
+            if (
+                row["source_hash"] != self._transcript_hash(transcript)
+                or row["source_hash"] != self._transcript_hash(self._row_to_transcript(source))
             ):
                 return False
             now = datetime.utcnow().isoformat()
-            conn.execute(
-                "UPDATE navigation_analyses SET nodes = ?, updated_at = ? WHERE job_id = ? AND view = ?",
-                (json.dumps(updated.nodes), now, expected.job_id, expected.view),
-            )
-            conn.commit()
-        updated.updated_at = now
+            conn.execute("""
+                UPDATE video_analyses SET status = ?, summary = ?, key_points = ?, nodes = ?,
+                    provider = ?, model = ?, error = ?, updated_at = ?
+                WHERE job_id = ? AND id = ?
+            """, (result.status.value, result.summary, json.dumps(result.key_points),
+                  json.dumps(result.nodes), result.provider, result.model, result.error,
+                  now, result.job_id, result.id))
+        result.updated_at = now
         return True
-
-    def claim_navigation(
-        self, job_id: str, view: str, provider: Optional[str] = None,
-        model: Optional[str] = None, *, replace_completed: bool = True,
-    ) -> bool:
-        """Atomically reserve a view, allowing failed or abandoned requests to retry.
-
-        A live request refreshes its lease with lease_navigation. Reservations
-        untouched for 15 minutes can be recovered after an API restart.
-        """
-        if view not in ("timeline", "topics"):
-            raise ValueError("Navigation view must be 'timeline' or 'topics'")
-        now = datetime.utcnow().isoformat()
-        stale_before = (datetime.utcnow() - timedelta(minutes=15)).isoformat()
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO navigation_analyses
-                (job_id, view, status, nodes, created_at, updated_at, provider, model)
-                SELECT ?, ?, 'processing', '[]', ?, ?, ?, ?
-                WHERE EXISTS (SELECT 1 FROM jobs WHERE id = ?)
-                ON CONFLICT(job_id, view) DO UPDATE SET
-                    status = 'processing', error = NULL, updated_at = excluded.updated_at,
-                    provider = excluded.provider, model = excluded.model
-                WHERE navigation_analyses.status = 'failed'
-                    OR (navigation_analyses.status = 'completed' AND ? AND ? IS NOT NULL
-                        AND (COALESCE(navigation_analyses.provider, 'kimi') != ?
-                             OR navigation_analyses.model IS NOT ?))
-                    OR (navigation_analyses.status IN ('pending', 'processing')
-                        AND navigation_analyses.updated_at < ?)
-                """,
-                (job_id, view, now, now, provider, model, job_id, replace_completed, provider, provider, model, stale_before),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-
-    def lease_navigation(self, job_id: str, view: str) -> bool:
-        """Refresh an existing processing reservation without recreating deleted rows."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                """UPDATE navigation_analyses SET updated_at = ?
-                   WHERE job_id = ? AND view = ? AND status = 'processing'""",
-                (datetime.utcnow().isoformat(), job_id, view),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-
-    def delete_navigation(self, job_id: str) -> bool:
-        with self._get_connection() as conn:
-            cursor = conn.execute("DELETE FROM navigation_analyses WHERE job_id = ?", (job_id,))
-            conn.commit()
-            return cursor.rowcount > 0
